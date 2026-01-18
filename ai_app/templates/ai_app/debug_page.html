@@ -1,0 +1,49 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>AI 功能測試台</title>
+    <style>
+        body { font-family: sans-serif; padding: 20px; max-width: 800px; margin: 0 auto; }
+        .box { border: 1px solid #ddd; padding: 20px; margin-bottom: 20px; border-radius: 8px; }
+        .btn { background: #007bff; color: white; padding: 10px 20px; border: none; border-radius: 4px; cursor: pointer; }
+        img { max-width: 300px; margin-top: 10px; border: 1px solid #ccc; }
+    </style>
+</head>
+<body>
+    <h1>🛠️ AI 模組測試台 (趙建凱)</h1>
+
+    <div class="box">
+        <h3>1. 本地測試 (去背)</h3>
+        <form method="post" enctype="multipart/form-data">
+            {% csrf_token %}
+            <input type="file" name="image" required>
+            <button type="submit" class="btn">上傳並去背</button>
+        </form>
+        {% if result_url %}
+            <div style="margin-top: 20px; background: #e8f5e9; padding: 10px;">
+                <p>✅ 處理成功！圖片路徑：<a href="{{ result_url }}" target="_blank">{{ result_url }}</a></p>
+                <img src="{{ result_url }}">
+            </div>
+        {% endif %}
+    </div>
+
+    <div class="box">
+        <h3>2. 模擬 API 呼叫 (給劉本澤看的)</h3>
+        <p>這會模擬 Postman 發送請求到 <code>/api/remove_bg</code></p>
+        <form action="/api/remove_bg" method="post" enctype="multipart/form-data" target="_blank">
+            <input type="file" name="clothes_image" required>
+            <button type="submit" class="btn" style="background: #28a745;">測試 remove_bg API</button>
+        </form>
+    </div>
+    
+    <div class="box">
+        <h3>3. 模擬 API 呼叫 (試穿)</h3>
+        <p>這會模擬 Postman 發送請求到 <code>/api/try_combine</code></p>
+        <form action="/api/try_combine" method="post" enctype="multipart/form-data" target="_blank">
+            <label>Model:</label> <input type="file" name="model_image" required><br><br>
+            <label>Cloth:</label> <input type="file" name="clothes_image" required><br><br>
+            <button type="submit" class="btn" style="background: #6f42c1;">測試 try_combine API</button>
+        </form>
+    </div>
+</body>
+</html>
