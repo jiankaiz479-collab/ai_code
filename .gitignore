@@ -1,4 +1,20 @@
 # .gitignore
+
+# 1. 忽略虛擬環境 (最重要)
 venv/
+env/
+.env
+
+# 2. 忽略 Python 編譯檔
 __pycache__/
 *.pyc
+
+# 3. 忽略資料庫 (通常不傳本地測試用的 DB)
+db.sqlite3
+
+# 4. 忽略上傳的圖片 (保留資料夾結構，但忽略裡面的圖)
+media/
+!media/.gitkeep
+
+# 5. 忽略 VS Code 設定
+.vscode/

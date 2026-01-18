@@ -1,8 +1,13 @@
+asgiref==3.11.0
 attrs==25.4.0
 certifi==2026.1.4
 charset-normalizer==3.4.4
+coloredlogs==15.0.1
+Django==5.2.10
 filelock==3.20.3
+flatbuffers==25.12.19
 fsspec==2026.1.0
+humanfriendly==10.0
 idna==3.11
 ImageIO==2.37.2
 Jinja2==3.1.6
@@ -30,12 +35,13 @@ nvidia-nccl-cu12==2.27.5
 nvidia-nvjitlink-cu12==12.8.93
 nvidia-nvshmem-cu12==3.3.20
 nvidia-nvtx-cu12==12.8.90
-opencv-python==4.12.0.88
+onnxruntime==1.23.2
 opencv-python-headless==4.12.0.88
 packaging==25.0
 pillow==12.1.0
 platformdirs==4.5.1
 pooch==1.8.2
+protobuf==6.33.4
 PyMatting==1.1.14
 referencing==0.37.0
 rembg==2.0.69
@@ -43,6 +49,7 @@ requests==2.32.5
 rpds-py==0.30.0
 scikit-image==0.25.2
 scipy==1.15.3
+sqlparse==0.5.5
 sympy==1.14.0
 tifffile==2025.5.10
 torch==2.9.1
