@@ -17,4 +17,5 @@ media/
 !media/.gitkeep
 
 # 5. 忽略 VS Code 設定
-.vscode/
+.vscode/.u2net/
+.u2net/
