@@ -15,6 +15,6 @@ python manage.py migrate
 echo "Collecting static files..."
 python manage.py collectstatic --noinput
 
-# Start the Django development server
-echo "Starting Django server on 0.0.0.0:8000..."
-python manage.py runserver 0.0.0.0:8000
+# Start the Django development server on port 8080
+echo "Starting Django server on 0.0.0.0:8080..."
+python manage.py runserver 0.0.0.0:8080
