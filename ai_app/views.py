@@ -59,6 +59,7 @@ class RemoveBgView(View):
     Method: POST
     Response: 符合 Excel 定義，回傳 JSON + Base64
     """
+
     def post(self, request):
         try:
             # 1. 解析 JSON
