@@ -10,4 +10,4 @@
 ### 1. 建置並啟動
 ```bash
 docker build -t ai_service .
-docker run -p 8080:8000 ai_service
+docker run -p 8001:8001 --env-file .env ai_service
