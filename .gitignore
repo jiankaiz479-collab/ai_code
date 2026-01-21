@@ -3,7 +3,7 @@
 # 1. 忽略虛擬環境 (最重要)
 venv/
 env/
-.env
+
 
 # 2. 忽略 Python 編譯檔
 __pycache__/
