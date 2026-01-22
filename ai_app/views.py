@@ -1,145 +1,113 @@
-import json
-import base64
 import os
-from django.conf import settings # 需要用到 settings 來找檔案路徑
-from django.shortcuts import render
-from django.core.files.base import ContentFile
-from django.http import JsonResponse
+from django.conf import settings
+from django.http import JsonResponse, FileResponse, HttpResponse
 from django.views import View
 from django.utils.decorators import method_decorator
 from django.views.decorators.csrf import csrf_exempt
 from .services.processing import AIProcessor
 
-# --- 輔助函式 1：把前端傳來的 Base64 轉成圖片檔案 (Input) ---
-def decode_base64_image(base64_string, file_name):
-    if ';base64,' in base64_string:
-        format, imgstr = base64_string.split(';base64,')
-        ext = format.split('/')[-1]
-    else:
-        imgstr = base64_string
-        ext = 'png'
-        
-    return ContentFile(base64.b64decode(imgstr), name=f"{file_name}.{ext}")
-
-# --- [新增] 輔助函式 2：把處理好的圖片轉回 Base64 (Output) ---
-def image_to_base64(image_path):
-    """
-    讀取硬碟上的圖片並轉為 Base64 字串 (不帶檔頭)
-    image_path: 圖片在系統中的絕對路徑
-    """
-    try:
-        with open(image_path, "rb") as img_file:
-            # 讀取二進制資料並轉為 Base64
-            encoded_string = base64.b64encode(img_file.read()).decode('utf-8')
-            return encoded_string
-    except FileNotFoundError:
-        return None
-
-# --- 1. 測試頁面 View (保持不變) ---
-class DebugPageView(View):
-    def get(self, request):
-        return render(request, 'ai_app/debug_page.html')
-
-    def post(self, request):
-        if 'image' not in request.FILES:
-            return render(request, 'ai_app/debug_page.html', {'error': '請選擇圖片'})
-            
-        processor = AIProcessor()
-        result_url = processor.remove_background(request.FILES['image'])
-        
-        return render(request, 'ai_app/debug_page.html', {
-            'result_url': result_url
-        })
-
-# --- 2. 正式 API: 去背 (已修改為回傳 Base64) ---
+# 根據 API 文件，這是一個 API 接口，所以我們要豁免 CSRF 檢查
 @method_decorator(csrf_exempt, name='dispatch')
 class RemoveBgView(View):
-    """
-    API: /api/remove_bg
-    Method: POST
-    Response: 符合 Excel 定義，回傳 JSON + Base64
-    """
-
-    def post(self, request):
-        try:
-            # 1. 解析 JSON
-            data = json.loads(request.body)
-            
-            # 2. 檢查欄位
-            if 'clothes_image_base64' not in data:
-                return JsonResponse({'status': 'error', 'message': 'Missing clothes_image_base64'}, status=400)
-
-            # 3. 轉檔 (Base64 -> File)
-            image_file = decode_base64_image(data['clothes_image_base64'], "temp_clothes")
-
-            # 4. 呼叫服務 (這裡假設它回傳的是相對路徑 URL，例如 '/media/results/xx.png')
-            processor = AIProcessor()
-            result_url = processor.remove_background(image_file)
-
-            # 5. [關鍵修改] 取得檔案的真實絕對路徑
-            # 注意：result_url 通常是 '/media/...'，我們需要把它轉成 '/app/media/...'
-            if result_url.startswith('/media/'):
-                # 去掉開頭的 /media/，然後跟 MEDIA_ROOT 接起來
-                real_file_path = os.path.join(settings.MEDIA_ROOT, result_url.replace('/media/', '', 1))
-            else:
-                # 如果回傳的已經是檔名，直接接
-                real_file_path = os.path.join(settings.MEDIA_ROOT, result_url)
-
-            # 6. [關鍵修改] 將圖片轉回 Base64
-            processed_base64 = image_to_base64(real_file_path)
-
-            if not processed_base64:
-                 return JsonResponse({'status': 'error', '2message': 'Result file not found'}, status=500)
-
-            # 7. 回傳結果 (完全依照 Excel 截圖的格式)
+    def post(self, request, *args, **kwargs):
+        # 1. 檢查請求格式是否為 multipart/form-data
+        # 雖然 Django 會自動處理，但確認是否有檔案上傳是必要的
+        
+        # 2. 獲取上傳的圖片
+        # 根據 API 文件 Page 3 (Source 9)，欄位名稱 (Key) 是 "clothes_image"
+        clothes_image = request.FILES.get('clothes_image')
+        
+        if not clothes_image:
+            # 根據 API 文件 Page 6，缺少參數回傳 400 Bad Request
             return JsonResponse({
-                "code": 200, 
-                "message": "success",
-                "data": {
-                    # 這裡就是 Excel 要求的欄位名稱
-                    "clothes_image_processed_base64": processed_base64
-                }
-            }, status=200)
+                "code": 400,
+                "message": "Missing parameter: clothes_image"
+            }, status=400)
 
-        except json.JSONDecodeError:
-            return JsonResponse({'status': 'error', 'message': 'Invalid JSON format'}, status=400)
+        try:
+            # 3. 呼叫您的 AI 處理器
+            processor = AIProcessor()
+            
+            # processor.remove_background 會回傳圖片的 "URL 字串" (例如 /media/removed_bg_xxx.png)
+            result_url = processor.remove_background(clothes_image)
+            
+            # 4. 準備回傳「二進位檔案」 (Binary)
+            # 因為 API 文件 Page 4 (Source 20-24) 要求回傳 Content-Type: image/png 的檔案流
+            # 我們需要從硬碟讀取剛剛存好的檔案
+            
+            # 從 URL 解析出實際檔案名稱
+            filename = os.path.basename(result_url)
+            local_file_path = os.path.join(settings.MEDIA_ROOT, filename)
+            
+            if not os.path.exists(local_file_path):
+                return JsonResponse({"code": 500, "message": "File processing failed"}, status=500)
+
+            # 開啟檔案並建立 FileResponse
+            # 這會自動設定 Content-Type: image/png 和 Content-Disposition
+            response = FileResponse(open(local_file_path, 'rb'), content_type='image/png')
+            
+            # 設定檔名 header
+            response['Content-Disposition'] = f'attachment; filename="{filename}"'
+            # 根據文件加入自定義 header (可選)
+            response['X-Message'] = 'Success'
+            
+            return response
+
         except Exception as e:
-            return JsonResponse({'status': 'error', 'message222': str(e)}, status=500)
-
-# --- 3. 正式 API: 試穿 (同樣修改為回傳 Base64) ---
+            # 捕捉任何運算錯誤，回傳 500
+            print(f"Error: {str(e)}")
+            return JsonResponse({
+                "code": 500,
+                "message": f"AI 模型運算失敗: {str(e)}"
+            }, status=500)
+# ==========================================
+#  補上缺失的 TryCombineView (虛擬試穿)
+# ==========================================
 @method_decorator(csrf_exempt, name='dispatch')
 class TryCombineView(View):
-    def post(self, request):
-        try:
-            data = json.loads(request.body)
+    def post(self, request, *args, **kwargs):
+        # 1. 根據 API 文件 Page 3 (Source 12) 接收兩張圖片
+        # 注意：API 文件寫 'garment_image'，但您的處理器可能習慣用 'clothes_image'，這裡做個相容
+        model_image = request.FILES.get('model_image')
+        clothes_image = request.FILES.get('garment_image') or request.FILES.get('clothes_image')
 
-            if 'model_image_base64' not in data or 'clothes_image_base64' not in data:
-                return JsonResponse({'status': 'error', 'message': 'Missing base64 images'}, status=400)
-
-            model_file = decode_base64_image(data['model_image_base64'], "temp_model")
-            clothes_file = decode_base64_image(data['clothes_image_base64'], "temp_clothes")
-
-            processor = AIProcessor()
-            result_url = processor.virtual_try_on(model_file, clothes_file)
-
-            # 取得真實路徑並轉碼
-            if result_url.startswith('/media/'):
-                real_file_path = os.path.join(settings.MEDIA_ROOT, result_url.replace('/media/', '', 1))
-            else:
-                real_file_path = os.path.join(settings.MEDIA_ROOT, result_url)
-            
-            result_base64 = image_to_base64(real_file_path)
-
-            if not result_base64:
-                 return JsonResponse({'status': 'error', 'messagessssss': 'Result file not found'}, status=500)
-
+        if not model_image or not clothes_image:
             return JsonResponse({
-                "code": 201, # Excel 上是寫 200，這裡建議統一
-                "message": "success",
-                "data": {
-                    "result_image_base64": result_base64
-                }
-            }, status=201)
+                "code": 400, 
+                "message": "Missing parameters: model_image or garment_image"
+            }, status=400)
+
+        try:
+            # 2. 呼叫 AIProcessor 的試穿功能
+            processor = AIProcessor()
+            # 根據您之前的程式碼，這裡會回傳 URL
+            result_url = processor.virtual_try_on(model_image, clothes_image)
+            
+            # 3. 轉成檔案回傳
+            filename = os.path.basename(result_url)
+            local_file_path = os.path.join(settings.MEDIA_ROOT, filename)
+            
+            if not os.path.exists(local_file_path):
+                 return JsonResponse({"code": 500, "message": "Try-on processing failed"}, status=500)
+
+            response = FileResponse(open(local_file_path, 'rb'), content_type='image/png')
+            response['Content-Disposition'] = f'attachment; filename="tryon_result.png"'
+            return response
 
         except Exception as e:
-            return JsonResponse({'status': 'error', 'message': str(e)}, status=500)
+            return JsonResponse({"code": 500, "message": str(e)}, status=500)
+
+
+# ==========================================
+#  補上缺失的 DebugPageView (防止報錯)
+# ==========================================
+class DebugPageView(View):
+    def get(self, request):
+        return JsonResponse({
+            "status": "running",
+            "message": "AI Core Server is Online",
+            "api_endpoints": [
+                "/api/remove_bg",
+                "/api/try_combine"
+            ]
+        })
