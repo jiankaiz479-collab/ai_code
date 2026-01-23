@@ -22,8 +22,10 @@ RUN python -c "from rembg.session_factory import new_session; new_session('u2net
 # 6. 複製其餘程式碼
 COPY . .
 
-# 7. 開放 Port
-EXPOSE 8000
+# 7. [修改點 1] 開放 Port 8002
+# 告訴 Docker 這個容器會監聽 8002
+EXPOSE 8002
 
-# 8. 啟動 Django
-CMD ["python", "manage.py", "runserver", "0.0.0.0:8000"]
+# 8. [修改點 2] 啟動 Django 改用 8002
+# 讓 Django 在容器內部使用 8002 Port 啟動
+CMD ["python", "manage.py", "runserver", "0.0.0.0:8002"]
