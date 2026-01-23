@@ -46,11 +46,11 @@ docker rm ai_core_container 2>/dev/null
 # 啟動新容器，映射端口 RUN_PORT:8001，掛載主機目錄支持熱重載，並設置環境變數，覆蓋默認命令讓應用監聽 8001
 docker run -d \
     --name ai_core_container \
-    -p $RUN_PORT:8001 \
+    -p $RUN_PORT:8002 \
     -v $(pwd):/app \
     --env-file .env \
     ai_core_app \
-    python manage.py runserver 0.0.0.0:8001
+    python manage.py runserver 0.0.0.0:8002
 
 if [ $? -eq 0 ]; then
     echo "容器啟動成功！應用現在運行在 http://localhost:$RUN_PORT"
