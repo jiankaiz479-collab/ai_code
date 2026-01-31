@@ -52,7 +52,7 @@ try:
     print(f"\n📊 總共找到 {count} 個模型可用。")
 
     # --- 簡單連線測試 ---
-    target_test_model = "gemini-2.0-flash" 
+    target_test_model = "gemini-2.5-flash-image" 
     print(f"\n🚀 正在進行簡單連線測試 (使用 {target_test_model})...")
     time.sleep(2) 
     
