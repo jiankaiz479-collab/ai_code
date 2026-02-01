@@ -7,88 +7,124 @@ from PIL import Image
 from google import genai
 from google.genai import types
 
+# [修正 3] 移除不必要的 quote import (那是 views.py 用的)
+
 class AIProcessor(ImageProcessingInterface):
     
     def __init__(self):
         self.api_key = os.getenv("GOOGLE_API_KEY")
-        
-        # 如果是 Docker 環境，記得確認已安裝 google-genai
         self.client = genai.Client(api_key=self.api_key) if self.api_key else None
         
-        # ★ 修改重點：優先讀取環境變數，如果沒設定才用預設值
-        # 這樣您的 .env 設定 (GEMINI_MODEL_NAME=gemini-2.0-flash-exp 或其他) 就會生效
-        self.model_name = os.getenv("GEMINI_MODEL_NAME", "gemini-1.5-flash")
+        # 1. 分析專用：輕量、快速
+        self.analysis_model = "gemini-1.5-flash"
         
-        print(f"🤖 目前使用的 AI 模型: {self.model_name}")
+        # 2. 合成專用：強力繪圖模型
+        self.model_name = os.getenv("GEMINI_MODEL_NAME", "gemini-1.5-flash")
+
+        print(f"🤖 AI 模型載入完成:")
+        print(f"   - 分析師: {self.analysis_model}")
+        print(f"   - 畫師:   {self.model_name}")
 
     def _get_unique_filename(self, prefix="img", ext="png"):
-        """
-        核心命名邏輯：透過 prefix 區分不同用途的檔案
-        """
-        # 例如產生: clean_cloth_a1b2c3d4.png
         filename = f"{prefix}_{uuid.uuid4().hex[:8]}.{ext}"
         save_path = os.path.join(settings.MEDIA_ROOT, filename)
         os.makedirs(settings.MEDIA_ROOT, exist_ok=True)
         return filename, save_path
 
     # ==========================================
-    #  功能 A: 純去背 (產出 clean_cloth)
+    #  功能 A: 純去背
     # ==========================================
     def remove_background(self, clothes_image) -> str:
-        print(f"🚀 [AI] 執行去背: {clothes_image.name}")
-        
+        print(f"🚀 [AI] 執行去背...")
         if hasattr(clothes_image, 'seek'): clothes_image.seek(0)
         input_img = Image.open(clothes_image)
         output_img = remove(input_img)
-        
-        # ★ 關鍵：這裡命名為 'clean_cloth'，代表乾淨的衣服
         filename, save_path = self._get_unique_filename(prefix="clean_cloth", ext="png")
         output_img.save(save_path)
-        
-        print(f"✅ 去背存檔: {filename}")
-        # 回傳完整路徑 (方便 View 直接讀取)
         return save_path
 
     # ==========================================
-    #  功能 B: 純合成 (產出 tryon_final)
+    #  功能 B: 衣服特徵分析 (Internal Function)
     # ==========================================
-    def virtual_try_on(self, model_image, clean_clothes_path) -> str:
+    def analyze_garment(self, pil_cloth_img) -> str:
+        """
+        讓 AI 先看懂這件衣服，產生詳細描述
+        """
+        print(f"🧐 [AI 分析] 正在解析衣服細節...")
+        try:
+            analysis_prompt = """
+            Describe this clothing item in detail for a fashion generative AI.
+            Focus on: color, material texture, pattern, sleeve style, and neck type.
+            Keep it under 30 words.
+            Example: "A navy blue denim jacket with silver buttons."
+            """
+            
+            response = self.client.models.generate_content(
+                model=self.analysis_model,
+                contents=[pil_cloth_img, analysis_prompt]
+            )
+            
+            description = response.text if response.text else "A stylish garment"
+            print(f"📝 分析結果: {description}")
+            return description
+
+        except Exception as e:
+            print(f"⚠️ 分析失敗 (使用預設值): {e}")
+            return "A clothing item"
+
+    # ==========================================
+    #  功能 C: 最終合成 (整合了分析與繪圖)
+    # ==========================================
+    def virtual_try_on(self, model_image, clean_clothes_path):
         print(f"👗 [AI] 執行合成: 模特兒 + 去背衣服")
 
         if not self.api_key:
             raise ValueError("No API Key found")
 
-        # 1. 讀取圖片
+        # 1. 讀取圖片 (Load Signals)
         if hasattr(model_image, 'seek'): model_image.seek(0)
         pil_model = Image.open(model_image)
-        
-        # 直接讀取剛剛去背好的檔案路徑
-        pil_cloth = Image.open(clean_clothes_path)
+        pil_cloth = Image.open(clean_clothes_path) # 讀取剛剛去背好的圖
 
-        # 2. 設定 Prompt (保持簡潔)
-        prompt = """
+        # --- [修正 1] 關鍵步驟：先分析衣服，拿到特徵 ---
+        garment_description = self.analyze_garment(pil_cloth)
+
+        # 2. 設定 Prompt (將分析結果注入 Prompt)
+        # 這樣做，生成模型就不會「瞎畫」，它會知道這是一件 "Blue Denim Jacket"
+        prompt = f"""
         Task: Virtual Try-On.
+        Garment Details: {garment_description}
         Action: Generate a photorealistic image of the person (Input 2) wearing the garment (Input 1).
-        Constraint: The output must be the person WEARING the clothes.
+        Constraint: The output must be the person WEARING the clothes. Ensure the texture matches the description.
         """
 
-        # 3. 呼叫 Gemini
+        # 3. 呼叫 Gemini (Synthesis)
+        # 注意：這裡不設 response_mime_type，因為我們可能想看它的思考文字
         response = self.client.models.generate_content(
             model=self.model_name,
-            contents=[pil_cloth, pil_model, prompt],
+            contents=[pil_cloth, pil_model, prompt]
         )
 
-        # 4. 存檔
+        # 預設回傳值
+        # 這裡我們回傳剛剛分析出來的 garment_description，這樣你在 Postman 就看得到「衣服分析」
+        final_analysis_text = f"[衣服分析]: {garment_description}"
+        final_save_path = None
+
         if response.parts:
             for part in response.parts:
+                # 📷 抓取圖片
                 if part.inline_data:
                     image = part.as_image()
-                    
-                    # ★ 關鍵：這裡命名為 'tryon_final'，代表最終合成圖
-                    filename, save_path = self._get_unique_filename(prefix="tryon_final", ext="png")
-                    image.save(save_path)
-                    
-                    print(f"✅ 合成存檔: {filename}")
-                    return save_path
+                    filename, final_save_path = self._get_unique_filename(prefix="tryon_final", ext="png")
+                    image.save(final_save_path)
+                
+                # 📝 抓取生成模型的額外說明 (如果有)
+                if part.text:
+                    final_analysis_text += f" | [生成備註]: {part.text}"
+                    print(f"📝 [生成備註]: {part.text}")
+
+        if final_save_path:
+            # 回傳：圖片路徑, 分析文字
+            return final_save_path, final_analysis_text
         
         raise ValueError("Gemini 未回傳圖片")
