@@ -52,11 +52,30 @@ class AIProcessor(ImageProcessingInterface):
         """
         print(f"🧐 [AI 分析] 正在解析衣服細節...")
         try:
+            # 讓 AI 擔任高階時尚分析師，不限字數，細節全開
+            # 修改分析指令：強調「客觀描述」與「禁止美化」
             analysis_prompt = """
-            Describe this clothing item in detail for a fashion generative AI.
-            Focus on: color, material texture, pattern, sleeve style, and neck type.
-            Keep it under 30 words.
-            Example: "A navy blue denim jacket with silver buttons."
+            Role: Expert Technical Fashion Analyst & Forensic Observer.
+            Task: Analyze this clothing image and provide an extremely detailed, OBJECTIVE visual description.
+
+            [Requirements]
+            1. **NO WORD LIMIT**: Describe every visible detail thoroughly.
+            2. **Fabric & Texture**: Is it knitted? Woven? Denim? Silk? Describe the surface texture (e.g., ribbed, fuzzy, smooth, shiny) and fabric weight.
+            3. **Patterns & Graphics**: 
+               - Describe stripes, prints, or graphics EXACTLY as they appear. 
+               - If a pattern is irregular or asymmetrical, describe it as such. 
+               - If there is a logo or text, describe its content, color, and location precisely.
+            4. **Construction Details**: Describe the neckline, sleeve style, hemline, and fit exactly as seen.
+            5. **Hardware**: Mention buttons, zippers, or drawstrings if visible.
+            6. **Color Accuracy**: Use specific color names (e.g., "navy blue", "off-white").
+
+            [CRITICAL: DO NOT MODIFY OR "FIX" THE DESIGN]
+            - **OBSERVE ONLY**: Do not guess obscured details. Do not "improve" or "modernize" the style.
+            - **LOGO/TEXT FIDELITY**: If text is cut off or blurry, describe strictly what is visible (e.g., "Partial text showing 'SUP...'"). DO NOT hallucinate or complete the words.
+            - **PATTERN ACCURACY**: Do not turn a unique pattern into a generic one. If the pattern looks hand-drawn or distressed, say so.
+
+            [Output Goal]
+            Produce a factual, evidence-based description that allows a reconstruction of the EXACT same garment without any artistic interpretation.
             """
             
             response = self.client.models.generate_content(
