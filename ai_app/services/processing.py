@@ -16,7 +16,7 @@ class AIProcessor(ImageProcessingInterface):
         self.client = genai.Client(api_key=self.api_key) if self.api_key else None
         
         # 1. 分析專用：輕量、快速
-        self.analysis_model = "gemini-1.5-flash"
+        self.analysis_model = "gemini-3-flash-preview"
         
         # 2. 合成專用：強力繪圖模型
         self.model_name = os.getenv("GEMINI_MODEL_NAME", "gemini-1.5-flash")
