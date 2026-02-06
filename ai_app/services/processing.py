@@ -25,7 +25,7 @@ class AIProcessor(ImageProcessingInterface):
         
         # 3. 設定模型
         # 分析用的模型 (Pro 版本看細節較準)
-        self.analysis_model = "gemini-1.5-pro" 
+        self.analysis_model = "Gemini 3 Pro" 
         # 合成用的模型 (Flash 2.0 Exp 版本)
         self.model_name = os.getenv("GEMINI_MODEL_NAME", "gemini-2.0-flash-exp")
 
