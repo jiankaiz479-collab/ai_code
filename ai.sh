@@ -1,6 +1,6 @@
 #!/bin/bash
 
-# 腳本說明：此腳本用於啟動 ai_core Django 應用，並自動處理 Docker 相關操作。
+# 腳本說明：此腳本用於啟動 ai_code Django 應用，並自動處理 Docker 相關操作。
 # 它會檢查 Docker 是否安裝並運行，然後構建 Docker 鏡像並啟動容器。
 # 容器內的應用會運行在端口 8001，並映射到主機的 RUN_PORT 端口（從 .env 文件讀取）。
 # 新增：支持熱重載，通過卷掛載主機目錄到容器。
@@ -30,7 +30,7 @@ fi
 echo "Docker 檢查通過，正在構建鏡像..."
 
 # 構建 Docker 鏡像
-docker build -t ai_core_app .
+docker build -t ai_code_app .
 
 if [ $? -ne 0 ]; then
     echo "錯誤：Docker 鏡像構建失敗。"
@@ -40,16 +40,16 @@ fi
 echo "鏡像構建成功，正在啟動容器（支持熱重載）..."
 
 # 停止並刪除可能存在的舊容器
-docker stop ai_core_container 2>/dev/null
-docker rm ai_core_container 2>/dev/null
+docker stop ai_code_container 2>/dev/null
+docker rm ai_code_container 2>/dev/null
 
 # 啟動新容器，映射端口 RUN_PORT:8001，掛載主機目錄支持熱重載，並設置環境變數，覆蓋默認命令讓應用監聽 8001
 docker run -d \
-    --name ai_core_container \
+    --name ai_code_container \
     -p $RUN_PORT:8002 \
     -v $(pwd):/app \
     --env-file .env \
-    ai_core_app \
+    ai_code_app \
     python manage.py runserver 0.0.0.0:8002
 
 if [ $? -eq 0 ]; then
