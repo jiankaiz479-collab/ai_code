@@ -40,44 +40,43 @@ class AIProcessor(ImageProcessingInterface):
         return filename, save_path
 
     # ==========================================
-    # [新增] OpenCV BGR 矩陣提取
+    # [工具] OpenCV BGR 矩陣提取
     # ==========================================
     def _extract_bgr_matrix(self, image_path):
-        """
-        利用 OpenCV 讀取去背圖，過濾 Alpha 通道後取得衣服純色的平均 BGR 矩陣
-        """
         try:
-            # 讀取包含透明通道的圖片 (IMREAD_UNCHANGED)
             img = cv2.imread(image_path, cv2.IMREAD_UNCHANGED)
             if img is None or img.shape[2] < 4:
-                return [255, 255, 255] # 預設回傳白色
+                return [200, 200, 200]
 
-            # 分離通道
             b, g, r, a = cv2.split(img)
-            # 建立遮罩：只選取不透明的像素 (Alpha > 0)
-            mask = a > 0
+            bgr_tmp = cv2.merge([b, g, r])
+            hsv = cv2.cvtColor(bgr_tmp, cv2.COLOR_BGR2HSV)
+            v_channel = hsv[:, :, 2]
+
+            # 排除深影與高光，提取固有色
+            physical_mask = (a > 0) & (v_channel > 50) & (v_channel < 225)
             
-            # 計算該區域的平均 BGR 值
-            mean_b = np.mean(b[mask])
-            mean_g = np.mean(g[mask])
-            mean_r = np.mean(r[mask])
+            if not np.any(physical_mask):
+                return [255, 192, 203]
+
+            mean_b = np.mean(b[physical_mask])
+            mean_g = np.mean(g[physical_mask])
+            mean_r = np.mean(r[physical_mask])
             
-            return [int(mean_r), int(mean_g), int(mean_b)] # 轉為 RGB 順序回傳
+            return [int(mean_r), int(mean_g), int(mean_b)]
         except Exception as e:
-            logger.error(f"BGR 提取失敗: {e}")
+            logger.error(f"色彩矩陣提取失敗: {e}")
             return [255, 255, 255]
 
     # ==========================================
-    # [後期開發] 語意區域定位 (Gemini 分析)
+    # [後期開發] 語意遮罩生成
     # ==========================================
     def _get_semantic_ruffle_mask(self, pil_img, gray_cv_img):
         h, w = gray_cv_img.shape
         prompt = """
-        Identify precise bounding boxes for:
-        1. "deep_shadows": Dark crevices in ruffles.
-        2. "specular_highlights": Bright light spots.
+        Identify precise bounding boxes for "deep_shadows" and "specular_highlights".
         Return JSON: [{"label": string, "box_2d": [ymin, xmin, ymax, xmax]}].
-        Coordinates normalized to 1000.
+        Normalized to 1000.
         """
         try:
             response = self.client.models.generate_content(
@@ -97,11 +96,12 @@ class AIProcessor(ImageProcessingInterface):
             return np.zeros((h, w), dtype=np.uint8)
 
     # ==========================================
-    # [核心處理] 磨皮引擎
+    # [核心] OpenCV 磨皮引擎
     # ==========================================
     def _opencv_smooth_fabric(self, pil_img):
         try:
-            USE_SEMANTIC_LOGIC = True # <--- 修改此處切換初期/後期
+            # 開關：可手動切換 True/False
+            USE_SEMANTIC_LOGIC = False 
             
             open_cv_image = np.array(pil_img.convert('RGB'))
             img = cv2.cvtColor(open_cv_image, cv2.COLOR_RGB2BGR)
@@ -117,8 +117,8 @@ class AIProcessor(ImageProcessingInterface):
                 max_val = np.max(gray)
                 _, highlight_mask = cv2.threshold(gray, max_val * 0.9, 255, cv2.THRESH_BINARY)
                 combined_mask = cv2.bitwise_or(brightness_detail, highlight_mask)
-                smooth_power = 180
-            
+                smooth_power = 160
+
             blur_size = int(max(img.shape[:2]) / 40)
             if blur_size % 2 == 0: blur_size += 1
             combined_mask = cv2.GaussianBlur(combined_mask, (blur_size, blur_size), 0)
@@ -136,14 +136,17 @@ class AIProcessor(ImageProcessingInterface):
 
             return Image.fromarray(cv2.cvtColor(final_cv_img, cv2.COLOR_BGR2RGB))
         except Exception as e:
-            logger.error(f"處理失敗: {e}")
+            logger.error(f"OpenCV 磨皮失敗: {e}")
             return pil_img
 
+    # ==========================================
+    # [功能 1] 去背並提取顏色矩陣
+    # ==========================================
     def remove_background(self, clothes_image):
         if hasattr(clothes_image, 'seek'): clothes_image.seek(0)
         input_img = Image.open(clothes_image).convert("RGBA")
-        output_img = remove(input_img, session=self.rembg_session)
         
+        output_img = remove(input_img, session=self.rembg_session)
         bbox = output_img.getbbox()
         if bbox: output_img = output_img.crop(bbox)
 
@@ -151,34 +154,40 @@ class AIProcessor(ImageProcessingInterface):
         rgb_img = Image.merge('RGB', (r, g, b))
         smoothed_rgb = self._opencv_smooth_fabric(rgb_img)
 
-        output_img = Image.merge('RGBA', (*smoothed_rgb.split(), a))
-        output_img = ImageEnhance.Contrast(output_img).enhance(0.85) 
+        final_output = Image.merge('RGBA', (*smoothed_rgb.split(), a))
+        final_output = ImageEnhance.Contrast(final_output).enhance(0.85) 
         
-        filename, save_path = self._get_unique_filename(prefix="processed_cloth", ext="png")
-        output_img.save(save_path, "PNG")
-        return save_path
+        filename, save_path = self._get_unique_filename(prefix="processed", ext="png")
+        final_output.save(save_path, "PNG")
+
+        # 提取顏色矩陣
+        rgb_matrix = self._extract_bgr_matrix(save_path)
+
+        # 回傳雙參數供 View 使用
+        return save_path, rgb_matrix
 
     # ==========================================
-    # [合成] 整合 OpenCV 顏色矩陣資訊
+    # [功能 2] 合成衣服 (接收外部去背圖與顏色矩陣)
     # ==========================================
-    def virtual_try_on(self, model_image, clean_clothes_path):
+    def virtual_try_on(self, model_image, clean_clothes_path, rgb_matrix):
+        """
+        此函式現在直接接收由 remove_background 產出的 path 與 matrix
+        """
         if not self.client: raise ValueError("Gemini Client 未初始化")
-        
-        # 提取物理顏色特徵
-        rgb_matrix = self._extract_bgr_matrix(clean_clothes_path)
         
         pil_model = Image.open(model_image)
         pil_cloth = Image.open(clean_clothes_path)
         
+        # 利用傳入的 rgb_matrix 鎖定渲染顏色，防止失真
         vfx_prompt = f"""
-        ACT AS: Professional VFX Compositor.
-        TASK: Wrap [Image 1] onto the model in [Image 2].
-        TECHNICAL DATA: 
-        - The absolute base color (Albedo) of this garment is RGB{rgb_matrix}.
+        ACT AS: Professional VFX Artist.
+        TASK: Composite [Image 1] onto the model in [Image 2].
+        COLOR MATRIX (Physics Data): RGB{rgb_matrix}
+        
         RULES: 
-        1. Stick to RGB{rgb_matrix} for fabric surface; avoid color drift.
-        2. Eliminate original heavy shadow crevices.
-        3. Create NEW folds matching [Image 2]'s studio lighting.
+        1. Fabric base color must strictly follow RGB{rgb_matrix}. NO color drifting.
+        2. Remove ALL deep shadow crevices from [Image 1].
+        3. Create NEW folds and shadows that match [Image 2]'s studio lighting.
         """
         
         try:
@@ -191,9 +200,10 @@ class AIProcessor(ImageProcessingInterface):
                 for part in response.parts:
                     if part.inline_data:
                         image = part.as_image()
-                        _, final_save_path = self._get_unique_filename(prefix="final_tryon", ext="png")
+                        _, final_save_path = self._get_unique_filename(prefix="final", ext="png")
                         image.save(final_save_path)
-            return final_save_path, f"Matrix Extraction: {rgb_matrix}"
+            
+            return final_save_path, f"Color Lock Enabled: RGB{rgb_matrix}"
         except Exception as e:
             logger.error(f"合成失敗: {e}")
             raise e

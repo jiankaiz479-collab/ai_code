@@ -1,5 +1,5 @@
 from django.urls import path
-from .views import RemoveBgView, TryCombineView, DebugPageView
+from .views import RemoveBgView, TryCombineView
 
 urlpatterns = [
     # API 路徑 (對應 Excel 定義)
