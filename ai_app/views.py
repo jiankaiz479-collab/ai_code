@@ -105,18 +105,3 @@ class TryCombineView(View):
         except Exception as e:
             logger.error(f"❌ [TryOn] 系統錯誤: {str(e)}")
             return JsonResponse({"code": 500, "message": str(e)}, status=500)
-
-# ==========================================
-#  3. Debug 頁面
-# ==========================================
-class DebugPageView(View):
-    def get(self, request):
-        logger.debug("❤️ [Heartbeat] Debug Page Checked")
-        return JsonResponse({
-            "status": "running",
-            "message": "AI Core Server is Online",
-            "api_endpoints": [
-                "/api/remove_bg",
-                "/api/try_combine"
-            ]
-        })
