@@ -4,3 +4,5 @@ rembg[cpu]
 pillow
 requests
 python-dotenv
+opencv-python-headless
+numpy>=1.21.2
