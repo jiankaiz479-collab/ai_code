@@ -30,7 +30,7 @@ class AIProcessor(ImageProcessingInterface):
             logger.error(f"⚠️ Gemini Client 初始化失敗: {e}")
             self.client = None
         
-        self.consultant_model = "gemini-1.5-flash"
+        self.consultant_model = os.getenv("GEMINI_CONSULTANT_MODEL", "gemini-1.5-flash")
         self.model_name = os.getenv("GEMINI_MODEL_NAME", "gemini-2.0-flash-exp")
 
     def _get_unique_filename(self, prefix="img", ext="png"):
@@ -180,14 +180,22 @@ class AIProcessor(ImageProcessingInterface):
         
         # 利用傳入的 rgb_matrix 鎖定渲染顏色，防止失真
         vfx_prompt = f"""
-        ACT AS: Professional VFX Artist.
-        TASK: Composite [Image 1] onto the model in [Image 2].
-        COLOR MATRIX (Physics Data): RGB{rgb_matrix}
+        ACT AS: A Senior VFX Compositor and Fashion Photographer.
         
-        RULES: 
-        1. Fabric base color must strictly follow RGB{rgb_matrix}. NO color drifting.
-        2. Remove ALL deep shadow crevices from [Image 1].
-        3. Create NEW folds and shadows that match [Image 2]'s studio lighting.
+        TASK: Photorealistically wrap the garment from [Image 1] onto the human model in [Image 2].
+        
+        TECHNICAL SPECIFICATIONS:
+        1. COLOR FIDELITY: The garment's intrinsic albedo color is strictly RGB{rgb_matrix}. Maintain this color profile while allowing for natural highlight and shadow variations.
+        2. FABRIC PHYSICS: Analyze the body pose in [Image 2]. Deform [Image 1] to follow the contours, curves, and perspective of the model's torso perfectly.
+        3. LIGHTING MATCH: Identify the light source direction in [Image 2]. Apply identical global illumination, directional shadows, and rim lighting to the garment.
+        
+        COMPOSITING RULES:
+        - ELIMINATE ARTIFACTS: Completely remove the static shadows and wrinkles from the flat-lay [Image 1]. 
+        - ORGANIC FOLDS: Generate new, organic micro-folds and tension lines where the fabric stretches over joints or tucks into the body.
+        - EDGE BLENDING: Ensure seamless integration at the neck, sleeves, and waistline. Use subtle ambient occlusion (contact shadows) where the fabric meets the skin to prevent a "floating" look.
+        - TEXTURE RETENTION: Preserve the fine weave and material texture of [Image 1] while adjusting its luminosity to match [Image 2].
+        
+        OUTPUT: A high-fashion, high-resolution result where the garment appears to be physically worn during the original photoshoot of [Image 2].
         """
         
         try:
