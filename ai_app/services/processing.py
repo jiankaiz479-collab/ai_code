@@ -33,14 +33,14 @@ class AIProcessor(ImageProcessingInterface):
         self.consultant_model = os.getenv("GEMINI_CONSULTANT_MODEL", "gemini-1.5-flash")
         self.model_name = os.getenv("GEMINI_MODEL_NAME", "gemini-2.0-flash-exp")
 
-    def _get_unique_filename(self, prefix="img", ext="png"):
+    def get_unique_filename(self, prefix="img", ext="png"):
         filename = f"{prefix}_{uuid.uuid4().hex[:8]}.{ext}"
         save_path = os.path.join(settings.MEDIA_ROOT, filename)
         os.makedirs(settings.MEDIA_ROOT, exist_ok=True)
         return filename, save_path
 
     # ==========================================
-    # [工具] OpenCV BGR 矩陣提取
+    # [工具] OpenCV BGR 矩陣提取 (原始方法)
     # ==========================================
     def _extract_bgr_matrix(self, image_path):
         try:
@@ -48,7 +48,6 @@ class AIProcessor(ImageProcessingInterface):
             if img is None or img.shape[2] < 4: return [200, 200, 200]
 
             b, g, r, a = cv2.split(img)
-            # 建立更嚴格的遮罩：排除邊緣（避免 Alpha 混合產生的黑邊）
             kernel = np.ones((5,5), np.uint8)
             inner_mask = cv2.erode(a, kernel, iterations=2) 
             
@@ -56,12 +55,10 @@ class AIProcessor(ImageProcessingInterface):
             hsv = cv2.cvtColor(bgr_tmp, cv2.COLOR_BGR2HSV)
             v_channel = hsv[:, :, 2]
 
-            # 鎖定「中性亮度」區域 (50-220)，排除極深摺痕
             physical_mask = (inner_mask > 0) & (v_channel > 50) & (v_channel < 220)
             
             if not np.any(physical_mask): return [255, 192, 203]
 
-            # 【關鍵修改】改用 Median 排除離群值（髒色）
             mean_b = np.median(b[physical_mask])
             mean_g = np.median(g[physical_mask])
             mean_r = np.median(r[physical_mask])
@@ -72,7 +69,7 @@ class AIProcessor(ImageProcessingInterface):
             return [255, 255, 255]
 
     # ==========================================
-    # [後期開發] 語意遮罩生成
+    # [後期開發] 語意遮罩生成 (原始方法)
     # ==========================================
     def _get_semantic_ruffle_mask(self, pil_img, gray_cv_img):
         h, w = gray_cv_img.shape
@@ -99,11 +96,10 @@ class AIProcessor(ImageProcessingInterface):
             return np.zeros((h, w), dtype=np.uint8)
 
     # ==========================================
-    # [核心] OpenCV 磨皮引擎
+    # [核心] OpenCV 磨皮引擎 (原始方法)
     # ==========================================
     def _opencv_smooth_fabric(self, pil_img):
         try:
-            # 開關：可手動切換 True/False
             USE_SEMANTIC_LOGIC = False 
             
             open_cv_image = np.array(pil_img.convert('RGB'))
@@ -143,31 +139,261 @@ class AIProcessor(ImageProcessingInterface):
             return pil_img
 
     # ==========================================
+    # [工具方法] Rembg 去背 (可切換)
+    # ==========================================
+    def remove_bg_with_rembg(self, input_img):
+        """
+        去背工具方法
+        返回: (output_img, success: bool, error: str)
+        ⚠️ TODO: 切換工具時只需修改此方法
+        """
+        try:
+            output_img = remove(input_img, session=self.rembg_session)
+            bbox = output_img.getbbox()
+            if bbox: 
+                output_img = output_img.crop(bbox)
+            return output_img, True, None
+        except Exception as e:
+            logger.error(f"Rembg 去背失敗: {e}")
+            return None, False, str(e)
+
+    # ==========================================
+    # [工具方法] 圖片清晰度檢測 (可切換)
+    # ==========================================
+    def check_image_blur(self, pil_img, threshold=50.0):
+        """
+        清晰度檢測工具方法
+        返回: (is_clear: bool, score: float, error: str)
+        ⚠️ TODO: 切換工具時只需修改此方法
+        """
+        try:
+            gray = cv2.cvtColor(np.array(pil_img.convert('RGB')), cv2.COLOR_RGB2GRAY)
+            laplacian_var = cv2.Laplacian(gray, cv2.CV_64F).var()
+            
+            is_clear = laplacian_var >= threshold
+            return is_clear, laplacian_var, None
+        except Exception as e:
+            logger.warning(f"清晰度檢測失敗: {e}")
+            return True, 0, str(e)
+
+    # ==========================================
+    # [工具方法] OpenCV 磨皮處理 (可切換)
+    # ==========================================
+    def smooth_fabric_with_opencv(self, rgb_img):
+        """
+        磨皮工具方法
+        返回: (smoothed_rgb, success: bool, error: str)
+        ⚠️ TODO: 切換工具時只需修改此方法
+        """
+        try:
+            smoothed_rgb = self._opencv_smooth_fabric(rgb_img)
+            return smoothed_rgb, True, None
+        except Exception as e:
+            logger.error(f"OpenCV 磨皮失敗: {e}")
+            return None, False, str(e)
+
+    # ==========================================
+    # [工具方法] 顏色矩陣提取 (可切換)
+    # ==========================================
+    def extract_color_matrix(self, image_path):
+        """
+        顏色提取工具方法
+        返回: (rgb_matrix: list, success: bool, error: str)
+        ⚠️ TODO: 切換工具時只需修改此方法
+        """
+        try:
+            rgb_matrix = self._extract_bgr_matrix(image_path)
+            return rgb_matrix, True, None
+        except Exception as e:
+            logger.error(f"顏色提取失敗: {e}")
+            return None, False, str(e)
+
+    # ==========================================
+    # [工具方法] 衣服風格分析 (可切換)
+    # ==========================================
+    def analyze_clothing_style(self, image_path):
+        """
+        風格分析工具方法
+        返回: (style_analysis: dict, success: bool, error: str)
+        ⚠️ TODO: 切換工具時只需修改此方法
+        """
+        # ========== 測試硬編碼版本（暫時） ==========
+        style_analysis = {
+            "ategory": "T-Shirt",
+            "style": "Casual",
+            "season": "Universal",
+            "color": "red",  
+            "analysis": "This is a casual t-shirt with a relaxed fit, suitable for everyday wear."
+        }
+        return style_analysis, True, None
+        
+        # ========== 真實 Gemini API 版本（待啟用） ==========
+        # if self.client:
+        #     try:
+        #         pil_img = Image.open(image_path)
+        #         prompt = """
+        #         Analyze the clothing item in this image. Return JSON format:
+        #         {
+        #             "clothing_type": "type of garment",
+        #             "style": "style category (Casual, Formal, Vintage, etc.)",
+        #             "season": "suitable season",
+        #             "analysis": "brief description"
+        #         }
+        #         """
+        #         response = self.client.models.generate_content(
+        #             model=self.consultant_model,
+        #             contents=[pil_img, prompt],
+        #             config=types.GenerateContentConfig(response_mime_type="application/json")
+        #         )
+        #         return json.loads(response.text), True, None
+        #     except Exception as e:
+        #         logger.warning(f"Gemini 風格分析失敗: {e}")
+        #         return {
+        #             "clothing_type": "Unknown",
+        #             "style": "Unknown",
+        #             "season": "Universal",
+        #             "analysis": "Analysis failed"
+        #         }, False, str(e)
+        # else:
+        #     return {
+        #         "clothing_type": "Unknown",
+        #         "style": "Unknown",
+        #         "season": "Universal",
+        #         "analysis": "Client not initialized"
+        #     }, False, "Client not initialized"
+
+    # ==========================================
     # [功能 1] 去背並提取顏色矩陣
     # ==========================================
     def remove_background(self, clothes_image):
-        if hasattr(clothes_image, 'seek'): clothes_image.seek(0)
-        input_img = Image.open(clothes_image).convert("RGBA")
+        """
+        返回結構：
+        {
+            'success': True/False,
+            'code': 200/400/415/422/500,
+            'message': str,
+            'tools_status': [{...}],
+            'file_name': str,
+            'rgb_matrix': [r, g, b],
+            'style_analysis': {...},
+            'debug_info': {...}  # 仅失败时
+        }
+        """
+        tools_status = {
+            "rembg_engine": "not_started",
+            "opencv_masking": "not_started",
+            "gemini_consultant": "not_started",
+            "color_extraction": "not_started"
+        }
         
-        output_img = remove(input_img, session=self.rembg_session)
-        bbox = output_img.getbbox()
-        if bbox: output_img = output_img.crop(bbox)
+        try:
+            if hasattr(clothes_image, 'seek'): 
+                clothes_image.seek(0)
+            
+            input_img = Image.open(clothes_image).convert("RGBA")
+            
+            # ========== Step 1: 調用 Rembg 去背工具 ==========
+            output_img, success, error = self.remove_bg_with_rembg(input_img)
+            if not success:
+                tools_status["rembg_engine"] = "fail"
+                return {
+                    'success': False,
+                    'code': 422,
+                    'message': "Unprocessable Entity: 圖片過於模糊",
+                    'tools_status': [tools_status],
+                    'debug_info': {
+                        'error_type': 'RembgError',
+                        'error': error
+                    }
+                }
+            tools_status["rembg_engine"] = "success"
+            
+            # ========== Step 2: 調用清晰度檢測工具 ==========
+            is_clear, score, _ = self.check_image_blur(output_img, threshold=50.0)
+            if not is_clear:
+                logger.warning(f"⚠️ 圖片清晰度不足: {score:.2f}")
+                return {
+                    'success': False,
+                    'code': 422,
+                    'message': f"Unprocessable Entity: 圖片過於模糊 (score: {score:.1f})",
+                    'tools_status': [tools_status],
+                    'debug_info': {
+                        'error_type': 'ImageBlurryError',
+                        'score': round(score, 1),
+                        'threshold': 50.0,
+                        'suggest': "Please retake the photo in a brighter environment or stabilize your camera."
+                    }
+                }
+            
+            # ========== Step 3: 調用 OpenCV 磨皮工具 ==========
+            r, g, b, a = output_img.split()
+            rgb_img = Image.merge('RGB', (r, g, b))
+            smoothed_rgb, success, error = self.smooth_fabric_with_opencv(rgb_img)
+            if not success:
+                tools_status["opencv_masking"] = "fail"
+                return {
+                    'success': False,
+                    'code': 422,
+                    'message': "Unprocessable Entity: 圖片過於模糊",
+                    'tools_status': [tools_status],
+                    'debug_info': {
+                        'error_type': 'OpenCVProcessingError',
+                        'error': error
+                    }
+                }
+            tools_status["opencv_masking"] = "success"
 
-        r, g, b, a = output_img.split()
-        rgb_img = Image.merge('RGB', (r, g, b))
-        smoothed_rgb = self._opencv_smooth_fabric(rgb_img)
+            # ========== Step 4: 保存圖片 ==========
+            final_output = Image.merge('RGBA', (*smoothed_rgb.split(), a))
+            final_output = ImageEnhance.Contrast(final_output).enhance(0.85)
+            
+            filename, save_path = self.get_unique_filename(prefix="processed", ext="png")
+            final_output.save(save_path, "PNG")
 
-        final_output = Image.merge('RGBA', (*smoothed_rgb.split(), a))
-        final_output = ImageEnhance.Contrast(final_output).enhance(0.85) 
-        
-        filename, save_path = self._get_unique_filename(prefix="processed", ext="png")
-        final_output.save(save_path, "PNG")
+            # ========== Step 5: 調用顏色提取工具 ==========
+            rgb_matrix, success, error = self.extract_color_matrix(save_path)
+            if not success:
+                tools_status["color_extraction"] = "fail"
+                return {
+                    'success': False,
+                    'code': 422,
+                    'message': "Unprocessable Entity: 圖片過於模糊",
+                    'tools_status': [tools_status],
+                    'debug_info': {
+                        'error_type': 'ColorExtractionError',
+                        'error': error
+                    }
+                }
+            tools_status["color_extraction"] = "success"
 
-        # 提取顏色矩陣
-        rgb_matrix = self._extract_bgr_matrix(save_path)
+            # ========== Step 6: 調用風格分析工具 ==========
+            style_analysis, success, error = self.analyze_clothing_style(save_path)
+            tools_status["gemini_consultant"] = "success" if success else "fail"
 
-        # 回傳雙參數供 View 使用
-        return save_path, rgb_matrix
+            # ========== 成功回傳 ==========
+            logger.info(f"✅ 去背成功: {filename}, RGB: {rgb_matrix}")
+            return {
+                'success': True,
+                'code': 200,
+                'message': "OK: 去背成功",
+                'tools_status': [tools_status],
+                'file_name': filename,
+                'rgb_matrix': rgb_matrix,
+                'style_analysis': style_analysis
+            }
+
+        except Exception as e:
+            logger.error(f"❌ 去背發生未知錯誤: {str(e)}")
+            return {
+                'success': False,
+                'code': 500,
+                'message': "Internal Server Error: AI 模型運算失敗",
+                'tools_status': [tools_status],
+                'debug_info': {
+                    'error_type': type(e).__name__,
+                    'error': str(e)
+                }
+            }
 
     # ==========================================
     # [功能 2] 合成衣服 (接收外部去背圖與顏色矩陣)
@@ -210,7 +436,7 @@ class AIProcessor(ImageProcessingInterface):
                 for part in response.parts:
                     if part.inline_data:
                         image = part.as_image()
-                        _, final_save_path = self._get_unique_filename(prefix="final", ext="png")
+                        _, final_save_path = self.get_unique_filename(prefix="final", ext="png")
                         image.save(final_save_path)
             
             return final_save_path, f"Color Lock Enabled: RGB{rgb_matrix}"
