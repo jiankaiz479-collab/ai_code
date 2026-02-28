@@ -45,23 +45,26 @@ class AIProcessor(ImageProcessingInterface):
     def _extract_bgr_matrix(self, image_path):
         try:
             img = cv2.imread(image_path, cv2.IMREAD_UNCHANGED)
-            if img is None or img.shape[2] < 4:
-                return [200, 200, 200]
+            if img is None or img.shape[2] < 4: return [200, 200, 200]
 
             b, g, r, a = cv2.split(img)
+            # 建立更嚴格的遮罩：排除邊緣（避免 Alpha 混合產生的黑邊）
+            kernel = np.ones((5,5), np.uint8)
+            inner_mask = cv2.erode(a, kernel, iterations=2) 
+            
             bgr_tmp = cv2.merge([b, g, r])
             hsv = cv2.cvtColor(bgr_tmp, cv2.COLOR_BGR2HSV)
             v_channel = hsv[:, :, 2]
 
-            # 排除深影與高光，提取固有色
-            physical_mask = (a > 0) & (v_channel > 50) & (v_channel < 225)
+            # 鎖定「中性亮度」區域 (50-220)，排除極深摺痕
+            physical_mask = (inner_mask > 0) & (v_channel > 50) & (v_channel < 220)
             
-            if not np.any(physical_mask):
-                return [255, 192, 203]
+            if not np.any(physical_mask): return [255, 192, 203]
 
-            mean_b = np.mean(b[physical_mask])
-            mean_g = np.mean(g[physical_mask])
-            mean_r = np.mean(r[physical_mask])
+            # 【關鍵修改】改用 Median 排除離群值（髒色）
+            mean_b = np.median(b[physical_mask])
+            mean_g = np.median(g[physical_mask])
+            mean_r = np.median(r[physical_mask])
             
             return [int(mean_r), int(mean_g), int(mean_b)]
         except Exception as e:
@@ -180,22 +183,21 @@ class AIProcessor(ImageProcessingInterface):
         
         # 利用傳入的 rgb_matrix 鎖定渲染顏色，防止失真
         vfx_prompt = f"""
-        ACT AS: A Senior VFX Compositor and Fashion Photographer.
+        ACT AS: Professional VFX Technical Director.
         
-        TASK: Photorealistically wrap the garment from [Image 1] onto the human model in [Image 2].
+        TASK: High-fidelity clothing re-rendering using [Image 1] as the absolute texture and color reference for the model in [Image 2].
         
-        TECHNICAL SPECIFICATIONS:
-        1. COLOR FIDELITY: The garment's intrinsic albedo color is strictly RGB{rgb_matrix}. Maintain this color profile while allowing for natural highlight and shadow variations.
-        2. FABRIC PHYSICS: Analyze the body pose in [Image 2]. Deform [Image 1] to follow the contours, curves, and perspective of the model's torso perfectly.
-        3. LIGHTING MATCH: Identify the light source direction in [Image 2]. Apply identical global illumination, directional shadows, and rim lighting to the garment.
+        STRICT COLOR CONSTRAINTS:
+        - COLOR ANCHOR: The garment in [Image 1] has a measured Albedo (flat color) of RGB{rgb_matrix}.
+        - NO COLOR DRIFT: Do not allow the environment lighting or background of [Image 2] to tint or shift this color. If [Image 2] has a warm/cool cast, the garment must remain physically accurate to RGB{rgb_matrix} while only accepting the luminosity (light/dark) values.
+        - DELTA-E MINIMIZATION: Minimize perceived color difference between the processed [Image 1] and the final result.
         
-        COMPOSITING RULES:
-        - ELIMINATE ARTIFACTS: Completely remove the static shadows and wrinkles from the flat-lay [Image 1]. 
-        - ORGANIC FOLDS: Generate new, organic micro-folds and tension lines where the fabric stretches over joints or tucks into the body.
-        - EDGE BLENDING: Ensure seamless integration at the neck, sleeves, and waistline. Use subtle ambient occlusion (contact shadows) where the fabric meets the skin to prevent a "floating" look.
-        - TEXTURE RETENTION: Preserve the fine weave and material texture of [Image 1] while adjusting its luminosity to match [Image 2].
+        LIGHTING & SHADOW LOGIC:
+        - SHADOW NEUTRALITY: Render new shadows using desaturated, neutral tones. Do not use dark-saturated colors for folds, as this creates a "dirty" appearance.
+        - AMBIENT OCCLUSION: Only apply subtle contact shadows where fabric touches skin, ensuring the color at the contact point remains consistent with the garment's base.
         
-        OUTPUT: A high-fashion, high-resolution result where the garment appears to be physically worn during the original photoshoot of [Image 2].
+        OUTPUT REQUIREMENT:
+        The final product must pass a color-matching test against the provided RGB{rgb_matrix}. Ensure the fabric looks "new" and the color "vibrant" without artificial dullness.
         """
         
         try:

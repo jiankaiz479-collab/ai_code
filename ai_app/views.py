@@ -1,5 +1,7 @@
 import os
 import logging
+import cv2
+import numpy as np
 from urllib.parse import quote
 from django.conf import settings
 from django.http import JsonResponse, FileResponse
@@ -58,6 +60,7 @@ class RemoveBgView(View):
 class TryCombineView(View):
     def post(self, request, *args, **kwargs):
         model_image = request.FILES.get('model_image')
+        # 為了除錯方便，兼容兩種可能的 key
         clothes_image = request.FILES.get('garment_image') or request.FILES.get('clothes_image')
 
         if not model_image or not clothes_image:
@@ -65,15 +68,12 @@ class TryCombineView(View):
 
         try:
             processor = AIProcessor()
-            logger.info("🔄 [TryOn] 啟動色彩保護合成流水線...")
+            logger.info("🔄 [TryOn] 啟動正式合成流水線...")
             
-            # --- 順序 1: 先去背並提取 OpenCV 顏色矩陣 ---
-            # 這是為了確保 Gemini 在重畫時有「顏色物理標準」可參考
+            # 1. 取得去背素材與顏色矩陣 (內部已包含 OpenCV 磨皮處理)
             clean_path, color_matrix = processor.remove_background(clothes_image)
-            logger.info(f"🎨 [TryOn] 提取顏色矩陣成功: {color_matrix}")
-
-            # --- 順序 2: 將去背圖與顏色矩陣餵入合成功能 ---
-            # 透過 rgb_matrix 鎖定渲染色，防止衣服失真
+            
+            # 2. 取得 AI 合成結果 (使用色彩鎖定技術)
             result_path, ai_analysis = processor.virtual_try_on(
                 model_image, 
                 clean_path, 
@@ -81,20 +81,21 @@ class TryCombineView(View):
             )
             
             if not os.path.exists(result_path):
-                raise FileNotFoundError("合成完成但找不到輸出檔")
+                raise FileNotFoundError("合成完成但找不到輸出檔案")
 
+            # --- [正式輸出：直接回傳合成圖] ---
             filename = os.path.basename(result_path)
             response = FileResponse(open(result_path, 'rb'), content_type='image/png')
-            response['Content-Disposition'] = f'attachment; filename="tryon_result.png"'
+            response['Content-Disposition'] = f'attachment; filename="tryon_{filename}"'
             
-            # 將分析文字與使用的顏色矩陣封裝進 Header
+            # 依然在 Header 保留分析資訊與鎖定的顏色，方便後端追蹤
             safe_text = quote(ai_analysis, safe='/:, =.') 
             response['X-AI-Analysis'] = safe_text
             response['X-Color-Locked'] = str(color_matrix)
 
-            logger.info(f"✅ [TryOn] 合成成功，輸出路徑: {filename}")
+            logger.info(f"✅ [TryOn] 合成成功並回傳單圖")
             return response
 
         except Exception as e:
-            logger.error(f"❌ [TryOn] 流水線錯誤: {str(e)}")
+            logger.error(f"❌ [TryOn] 發生錯誤: {str(e)}")
             return JsonResponse({"code": 500, "message": str(e)}, status=500)
