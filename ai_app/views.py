@@ -90,8 +90,9 @@ class RemoveBgView(View):
                 # 直接使用 processing 返回的數據
                 analysis_data = {
                     "code": 200,
-                    "message": "Processing Success",
+                    "message": result.get('message', "Processing Success"),  # 使用动态消息
                     "tools_status": result.get('tools_status', {}),
+                    "error_details": result.get('error_details'),  # 新增：失败原因
                     "data": {
                         "file_name": file_name,
                         "file_format": "PNG",
@@ -99,7 +100,7 @@ class RemoveBgView(View):
                         "top_colors": result.get('top_colors')
                     }
                 }
-                
+                                
                 boundary = 'bg_removal_boundary'
                 response_body = []
                 
