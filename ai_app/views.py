@@ -176,26 +176,44 @@ class RemoveBgView(View):
             }, status=500)
 
 
+
 # ==========================================
-#  2. 虛擬試穿 (Virtual Try-On)
+# [功能 2] 虚拟试穿 (独立功能，不继承去背状态)
+# ==========================================
+# ==========================================
+# [功能 2] 虚拟试穿 (独立功能，不继承去背状态)
 # ==========================================
 @method_decorator(csrf_exempt, name='dispatch')
 class TryCombineView(View):
     def post(self, request, *args, **kwargs):
+        # ========== 接收文件 ==========
         model_image = request.FILES.get('model_image')
         garment_image = request.FILES.get('garment_image') or request.FILES.get('clothes_image')
 
+        # ========== 接收 JSON 数据 ==========
+        try:
+            # 尝试从 request.POST 获取 JSON 字符串
+            data_str = request.POST.get('data')
+            if data_str:
+                data = json.loads(data_str)
+            else:
+                # 如果没有 data 字段,使用空字典
+                data = {}
+        except json.JSONDecodeError as e:
+            logger.warning(f"⚠️ [TryOn] JSON 解析失败: {e}")
+            data = {}
+
+        # ========== 验证必要参数 ==========
         if not model_image or not garment_image:
-            logger.warning("⚠️ [TryOn] 缺少圖片")
+            logger.warning("⚠️ [TryOn] 缺少图片")
             return JsonResponse({
                 "code": 400,
-                "message": "Bad Request: 缺少必要圖片",
+                "message": "Bad Request: 缺少必要图片",
                 "tools_status": {
-                    "rembg_engine": "not_started",
-                    "opencv_masking": "not_started",
+                    "rembg": "not_started",
+                    "opencv_smoothing": "not_started",
                     "gemini_consultant": "not_started",
-                    "tryon_engine": "not_started",
-                    "color_adjustment": "not_started"
+                    "gemini_model": "not_started"
                 },
                 "debug_info": {
                     "error_type": "MissingFileError",
@@ -205,16 +223,15 @@ class TryCombineView(View):
 
         # 检查文件格式
         if not model_image.content_type.startswith('image/') or not garment_image.content_type.startswith('image/'):
-            logger.warning("⚠️ [TryOn] 不支援的檔案格式")
+            logger.warning("⚠️ [TryOn] 不支援的档案格式")
             return JsonResponse({
                 "code": 415,
-                "message": "Unsupported Media Type: 上傳非圖片檔",
+                "message": "Unsupported Media Type: 上传非图片档",
                 "tools_status": {
-                    "rembg_engine": "not_started",
-                    "opencv_masking": "not_started",
+                    "rembg": "not_started",
+                    "opencv_smoothing": "not_started",
                     "gemini_consultant": "not_started",
-                    "tryon_engine": "not_started",
-                    "color_adjustment": "not_started"
+                    "gemini_model": "not_started"
                 },
                 "debug_info": {
                     "error_type": "InvalidFormatError",
@@ -224,16 +241,19 @@ class TryCombineView(View):
 
         try:
             processor = AIProcessor()
-            logger.info("🔄 [TryOn] 啟動正式合成流水線...")
+            logger.info("🔄 [TryOn] 启动正式合成流水线...")
             
-            # 1. 取得去背素材 - processing 會返回完整的 tools_status
+            # ========== 提取参数 ==========
+            clothes_category = data.get('clothes_category', 'cloth')
+            model_info = data.get('model_info', {})
+            garment_info = data.get('garment_info', {})
+            
+            # 1. 取得去背素材
             result_bg = processor.remove_background(garment_image)
             
             if not result_bg.get('success'):
                 error_code = result_bg.get('code', 422)
-                logger.warning(f"⚠️ [TryOn] 去背失敗 (code={error_code})")
-                
-                # 直接使用 processing 返回的 tools_status
+                logger.warning(f"⚠️ [TryOn] 去背失败 (code={error_code})")
                 return JsonResponse({
                     "code": error_code,
                     "message": result_bg.get('message', "Background removal failed"),
@@ -243,17 +263,14 @@ class TryCombineView(View):
             
             clean_path = os.path.join(settings.MEDIA_ROOT, result_bg.get('file_name'))
             
-            # 檢查去背文件是否存在
+            # 检查去背文件是否存在
             if not os.path.exists(clean_path):
                 logger.error(f"❌ [TryOn] 去背文件不存在: {clean_path}")
-                
-                # 使用 processing 返回的 tools_status，添加 file_check 狀態
                 tools_status = result_bg.get('tools_status', {})
                 tools_status['file_check'] = 'fail'
-                
                 return JsonResponse({
                     "code": 500,
-                    "message": "Internal Server Error: 去背文件生成失敗",
+                    "message": "Internal Server Error: 去背文件生成失败",
                     "tools_status": tools_status,
                     "debug_info": {
                         "error_type": "FileNotFoundError",
@@ -262,20 +279,18 @@ class TryCombineView(View):
                     }
                 }, status=500)
             
-            color_matrix = result_bg.get('rgb_matrix')
-            
-            # 2. 取得 AI 合成結果 - processing 會返回完整的 tools_status
+            # 2. 调用 AI 合成结果（传入尺寸数据，不传颜色矩阵）
             result_tryon = processor.virtual_try_on(
-                model_image, 
-                clean_path, 
-                color_matrix
+                model_image=model_image,
+                clean_clothes_path=clean_path,
+                clothes_category=clothes_category,
+                model_info=model_info,
+                garment_info=garment_info
             )
             
             if not result_tryon.get('success'):
                 error_code = result_tryon.get('code', 422)
-                logger.warning(f"⚠️ [TryOn] 合成失敗 (code={error_code}): {result_tryon.get('message')}")
-                
-                # 直接使用 processing 返回的 tools_status
+                logger.warning(f"⚠️ [TryOn] 合成失败 (code={error_code}): {result_tryon.get('message')}")
                 return JsonResponse({
                     "code": error_code,
                     "message": result_tryon.get('message', "Virtual try-on failed"),
@@ -283,20 +298,17 @@ class TryCombineView(View):
                     "debug_info": result_tryon.get('debug_info', {})
                 }, status=error_code)
             
-            # 檢查輸出文件名稱
+            # 检查输出文件名称
             model_filename = result_tryon.get('model_image_filename')
             tryon_filename = result_tryon.get('tryon_result_filename')
             
             if not model_filename or not tryon_filename:
-                logger.error(f"❌ [TryOn] 回傳結果缺少文件名稱")
-                
-                # 使用 processing 返回的 tools_status，添加 result_validation 狀態
+                logger.error(f"❌ [TryOn] 返回结果缺少文件名称")
                 tools_status = result_tryon.get('tools_status', {})
                 tools_status['result_validation'] = 'fail'
-                
                 return JsonResponse({
                     "code": 500,
-                    "message": "Internal Server Error: 處理結果不完整",
+                    "message": "Internal Server Error: 处理结果不完整",
                     "tools_status": tools_status,
                     "debug_info": {
                         "error_type": "IncompleteResultError",
@@ -307,16 +319,14 @@ class TryCombineView(View):
             model_path = os.path.join(settings.MEDIA_ROOT, model_filename)
             tryon_path = os.path.join(settings.MEDIA_ROOT, tryon_filename)
             
-            # 檢查文件是否存在
+            # 检查文件是否存在
             if not os.path.exists(model_path):
-                logger.error(f"❌ [TryOn] 模特圖片不存在: {model_path}")
-                
+                logger.error(f"❌ [TryOn] 模特图片不存在: {model_path}")
                 tools_status = result_tryon.get('tools_status', {})
                 tools_status['file_check'] = 'fail'
-                
                 return JsonResponse({
                     "code": 500,
-                    "message": "Internal Server Error: 模特圖片文件缺失",
+                    "message": "Internal Server Error: 模特图片文件缺失",
                     "tools_status": tools_status,
                     "debug_info": {
                         "error_type": "FileNotFoundError",
@@ -325,14 +335,12 @@ class TryCombineView(View):
                 }, status=500)
             
             if not os.path.exists(tryon_path):
-                logger.error(f"❌ [TryOn] 試穿結果不存在: {tryon_path}")
-                
+                logger.error(f"❌ [TryOn] 试穿结果不存在: {tryon_path}")
                 tools_status = result_tryon.get('tools_status', {})
                 tools_status['file_check'] = 'fail'
-                
                 return JsonResponse({
                     "code": 500,
-                    "message": "Internal Server Error: 試穿結果文件缺失",
+                    "message": "Internal Server Error: 试穿结果文件缺失",
                     "tools_status": tools_status,
                     "debug_info": {
                         "error_type": "FileNotFoundError",
@@ -340,21 +348,19 @@ class TryCombineView(View):
                     }
                 }, status=500)
             
-            # 构建成功的响应 - 直接使用 processing 返回的數據
+            # 构建成功的响应
             analysis_data = {
                 "code": 200,
-                "message": "OK: 虛擬試穿成功",
+                "message": "Success",
                 "tools_status": result_tryon.get('tools_status', {}),
                 "data": {
-                    "model_image": model_filename,
-                    "try_on_result": tryon_filename,
-                    "file_format": "PNG",
-                    "style_analysis": result_bg.get('style_analysis', {})
+                    "file_name": tryon_filename,
+                    "file_format": "PNG"
                 }
             }
             
             # 构建 multipart/form-data 响应
-            boundary = 'try_on_boundary'
+            boundary = 'frame_boundary'
             response_body = []
             
             # Part 1: analysis (JSON)
@@ -364,46 +370,20 @@ class TryCombineView(View):
             response_body.append(json.dumps(analysis_data, ensure_ascii=False).encode('utf-8'))
             response_body.append(b'\r\n')
             
-            # Part 2: model_image (Binary)
+            # Part 2: try_on_result (Binary)
             response_body.append(f'--{boundary}\r\n'.encode('utf-8'))
-            response_body.append(f'Content-Disposition: form-data; name="model_image"; filename="{model_filename}"\r\n'.encode('utf-8'))
-            response_body.append(b'Content-Type: image/png\r\n\r\n')
-            try:
-                with open(model_path, 'rb') as f:
-                    response_body.append(f.read())
-            except Exception as e:
-                logger.error(f"❌ [TryOn] 讀取模特圖片失敗: {str(e)}")
-                
-                tools_status = result_tryon.get('tools_status', {})
-                tools_status['file_read'] = 'fail'
-                
-                return JsonResponse({
-                    "code": 500,
-                    "message": "Internal Server Error: 無法讀取模特圖片",
-                    "tools_status": tools_status,
-                    "debug_info": {
-                        "error_type": "FileReadError",
-                        "detail": str(e)
-                    }
-                }, status=500)
-            response_body.append(b'\r\n')
-            
-            # Part 3: try_on_result (Binary)
-            response_body.append(f'--{boundary}\r\n'.encode('utf-8'))
-            response_body.append(f'Content-Disposition: form-data; name="try_on_result"; filename="{tryon_filename}"\r\n'.encode('utf-8'))
+            response_body.append(f'Content-Disposition: form-data; name="processed_image"; filename="{tryon_filename}"\r\n'.encode('utf-8'))
             response_body.append(b'Content-Type: image/png\r\n\r\n')
             try:
                 with open(tryon_path, 'rb') as f:
                     response_body.append(f.read())
             except Exception as e:
-                logger.error(f"❌ [TryOn] 讀取試穿結果失敗: {str(e)}")
-                
+                logger.error(f"❌ [TryOn] 读取试穿结果失败: {str(e)}")
                 tools_status = result_tryon.get('tools_status', {})
                 tools_status['file_read'] = 'fail'
-                
                 return JsonResponse({
                     "code": 500,
-                    "message": "Internal Server Error: 無法讀取試穿結果",
+                    "message": "Internal Server Error: 无法读取试穿结果",
                     "tools_status": tools_status,
                     "debug_info": {
                         "error_type": "FileReadError",
@@ -411,7 +391,6 @@ class TryCombineView(View):
                     }
                 }, status=500)
             response_body.append(b'\r\n')
-            
             response_body.append(f'--{boundary}--\r\n'.encode('utf-8'))
             
             # 创建响应
@@ -420,22 +399,21 @@ class TryCombineView(View):
                 content_type=f'multipart/form-data; boundary={boundary}'
             )
             
-            logger.info(f"✅ [TryOn] 合成成功並回傳 multipart/form-data")
+            logger.info(f"✅ [TryOn] 合成成功并返回 multipart/form-data")
             return response
 
         except Exception as e:
-            logger.error(f"❌ [TryOn] 發生系統錯誤: {str(e)}")
+            logger.error(f"❌ [TryOn] 发生系统错误: {str(e)}")
             import traceback
             logger.error(traceback.format_exc())
             return JsonResponse({
                 "code": 500,
-                "message": "Internal Server Error: AI 模型運算失敗",
+                "message": "Internal Server Error: AI 模型运算失败",
                 "tools_status": {
-                    "rembg_engine": "error",
-                    "opencv_masking": "error",
+                    "rembg": "error",
+                    "opencv_smoothing": "error",
                     "gemini_consultant": "error",
-                    "tryon_engine": "error",
-                    "color_adjustment": "error"
+                    "gemini_model": "error"
                 },
                 "debug_info": {
                     "error_type": "RuntimeError",

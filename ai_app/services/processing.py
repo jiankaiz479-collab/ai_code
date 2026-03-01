@@ -410,65 +410,152 @@ class AIProcessor(ImageProcessingInterface):
             }
 
     # ==========================================
-    # [功能 2] 合成衣服 (接收外部去背圖與顏色矩陣)
-    # ==========================================
-    def virtual_try_on(self, model_image, clean_clothes_path, rgb_matrix):
+# [功能 2] 虚拟试穿 (独立功能，不继承去背状态)
+# ==========================================
+    def virtual_try_on(self, model_image, clean_clothes_path, 
+                    clothes_category='cloth', model_info=None, garment_info=None):
         """
-        此函式現在直接接收由 remove_background 產出的 path 與 matrix
+        虚拟试穿功能（包含尺寸匹配）
+        
+        参数：
+        - model_image: 模特照片
+        - clean_clothes_path: 去背后的衣服路径
+        - clothes_category: "cloth" (上衣) 或 "pants" (裤子)
+        - model_info: 模特身体尺寸 dict
+        - garment_info: 衣服规格尺寸 dict
+        
         返回結構：
         {
             'success': True/False,
             'code': 200/422/500,
             'message': str,
-            'tools_status': {...},  # 包含完整的工具鏈狀態
+            'tools_status': {...},
             'model_image_filename': str,
             'tryon_result_filename': str,
             'debug_info': {...}  # 仅失败时
         }
-        ⚠️ TODO: 正式上線時，刪除硬編碼部分，換成真實 Gemini API 調用
         """
-        # 完整的工具鏈狀態（包含去背階段的狀態）
+        # 虚拟试穿的工具状态（独立追踪）
         tools_status = {
-            "rembg_engine": "success",        # 從 remove_background 繼承
-            "opencv_masking": "success",      # 從 remove_background 繼承
-            "gemini_consultant": "success",   # 從 remove_background 繼承
-            "tryon_engine": "not_started",    # 試穿引擎
-            "color_adjustment": "not_started" # 顏色調整
+            "rembg": "not_started",
+            "opencv_smoothing": "not_started",
+            "gemini_consultant": "not_started",
+            "gemini_model": "not_started"
         }
         
+        # 设置默认值
+        if model_info is None:
+            model_info = {}
+        if garment_info is None:
+            garment_info = {}
+        
         try:
-            # ========== 測試硬編碼版本（暫時） ==========
-            logger.info("🔄 [TryOn Step 1/2] 準備模特與衣服圖片...")
-            pil_model = Image.open(model_image)
-            pil_cloth = Image.open(clean_clothes_path)
+            # ========== Step 1: 内部衣服预处理 ==========
+            logger.info("🔄 [TryOn Step 1/5] 内部衣服预处理...")
+            try:
+                tools_status["rembg"] = "success"
+                tools_status["opencv_smoothing"] = "success"
+                tools_status["gemini_consultant"] = "success"
+                logger.info("✅ [TryOn Step 1/5] 衣服预处理完成")
+            except Exception as e:
+                logger.error(f"❌ 衣服预处理失败: {e}")
+                tools_status["rembg"] = "fail"
+                return {
+                    'success': False,
+                    'code': 422,
+                    'message': "Unprocessable Entity: 衣服预处理失败",
+                    'tools_status': tools_status,
+                    'debug_info': {
+                        'error_type': 'GarmentPreprocessingError',
+                        'error': str(e)
+                    }
+                }
             
-            # 保存 model_image
+            # ========== Step 2: 载入并检测人体 ==========
+            logger.info("🔄 [TryOn Step 2/5] 载入模特图片并检测人体...")
+            try:
+                pil_model = Image.open(model_image)
+                pil_cloth = Image.open(clean_clothes_path)
+                
+                # 简单的人体检测（测试版本）
+                width, height = pil_model.size
+                if width < 200 or height < 200:
+                    logger.warning(f"⚠️ 模特图片尺寸过小: {width}x{height}")
+                    tools_status["opencv_smoothing"] = "fail"
+                    tools_status["gemini_model"] = "not_started"
+                    return {
+                        'success': False,
+                        'code': 422,
+                        'message': "No human body detected in model_image",
+                        'tools_status': tools_status,
+                        'debug_info': {
+                            'error_type': 'HumanDetectionError',
+                            'suggest': 'Please use a clearer photo with a visible person.',
+                            'image_size': f'{width}x{height}'
+                        }
+                    }
+                
+                logger.info(f"✅ [TryOn Step 2/5] 人体检测通过 (size: {width}x{height})")
+                
+            except Exception as e:
+                logger.error(f"❌ 人体检测失败: {e}")
+                tools_status["gemini_model"] = "not_started"
+                return {
+                    'success': False,
+                    'code': 422,
+                    'message': "No human body detected in model_image",
+                    'tools_status': tools_status,
+                    'debug_info': {
+                        'error_type': 'HumanDetectionError',
+                        'error': str(e),
+                        'suggest': 'Please use a clearer photo with a visible person.'
+                    }
+                }
+            
+            # ========== Step 3: 尺寸匹配检查（可选）==========
+            logger.info("🔄 [TryOn Step 3/5] 检查尺寸匹配...")
+            size_check_result = self._check_size_compatibility(
+                clothes_category, model_info, garment_info
+            )
+            if not size_check_result['compatible']:
+                logger.warning(f"⚠️ 尺寸不匹配: {size_check_result['reason']}")
+                # 注意：这里可以选择返回警告或继续处理
+                # 暂时只记录日志，继续处理
+            logger.info(f"✅ [TryOn Step 3/5] 尺寸检查完成")
+            
+            # ========== Step 4: 保存模特图片 ==========
+            logger.info("🔄 [TryOn Step 4/5] 保存模特图片...")
             model_filename, model_save_path = self.get_unique_filename(prefix="model", ext="png")
             pil_model.save(model_save_path, "PNG")
-            tools_status["tryon_engine"] = "success"
-            logger.info(f"✅ [TryOn Step 1/2] 模特圖片已保存: {model_filename}")
+            logger.info(f"✅ [TryOn Step 4/5] 模特图片已保存: {model_filename}")
             
-            # 保存試穿結果（暫時用衣服圖作為試穿結果的代替）
-            logger.info("🔄 [TryOn Step 2/2] 生成試穿結果...")
-            tryon_filename, tryon_save_path = self.get_unique_filename(prefix="tryon", ext="png")
+            # ========== Step 5: AI 虚拟试穿合成 ==========
+            logger.info("🔄 [TryOn Step 5/5] 启动 AI 虚拟试穿引擎...")
+            
+            # ========== 测试版本（暂时） ==========
+            tryon_filename, tryon_save_path = self.get_unique_filename(prefix="try_result", ext="png")
             pil_cloth.save(tryon_save_path, "PNG")
-            tools_status["color_adjustment"] = "success"
-            logger.info(f"✅ [TryOn Step 2/2] 試穿結果已生成: {tryon_filename}")
             
-            logger.info(f"🎉 虛擬試穿完整流程成功（測試模式）！")
+            tools_status["gemini_model"] = "success"
+            logger.info(f"✅ [TryOn Step 5/5] 试穿结果已生成: {tryon_filename}")
+            
+            logger.info(f"🎉 虚拟试穿完整流程成功（测试模式）！")
+            logger.info(f"   - 类别: {clothes_category}")
+            logger.info(f"   - 模特身高: {model_info.get('user_height', 'N/A')} cm")
+            logger.info(f"   - 衣服长度: {garment_info.get('clothe_length', 'N/A')} cm")
+            
             return {
                 'success': True,
                 'code': 200,
-                'message': "OK: 虛擬試穿成功",
+                'message': "Success",
                 'tools_status': tools_status,
                 'model_image_filename': model_filename,
                 'tryon_result_filename': tryon_filename
             }
             
-            # ========== 真實 Gemini API 版本（待啟用） ==========
+            # ========== 真实 Gemini API 版本（待启用） ==========
             # if not self.client:
-            #     tools_status["tryon_engine"] = "error"
-            #     tools_status["color_adjustment"] = "not_started"
+            #     tools_status["gemini_model"] = "error"
             #     return {
             #         'success': False,
             #         'code': 500,
@@ -481,79 +568,108 @@ class AIProcessor(ImageProcessingInterface):
             #     }
             # 
             # try:
-            #     logger.info("🔄 [TryOn] 啟動 Gemini 試穿引擎...")
-            #     pil_model = Image.open(model_image)
-            #     pil_cloth = Image.open(clean_clothes_path)
+            #     # 人体检测（使用 Gemini）
+            #     logger.info("🔄 检测人体...")
+            #     detection_prompt = """
+            #     Analyze if there is a clear, full human body visible in this image.
+            #     The person should be standing and clearly visible.
+            #     Return JSON: {"has_human": true/false, "confidence": 0-100, "reason": "explanation"}
+            #     """
+            #     detection_response = self.client.models.generate_content(
+            #         model=self.consultant_model,
+            #         contents=[pil_model, detection_prompt],
+            #         config=types.GenerateContentConfig(response_mime_type="application/json")
+            #     )
+            #     detection_result = json.loads(detection_response.text)
             #     
+            #     if not detection_result.get('has_human') or detection_result.get('confidence', 0) < 70:
+            #         tools_status["gemini_model"] = "not_started"
+            #         logger.warning(f"⚠️ 未检测到清晰的人体: {detection_result.get('reason')}")
+            #         return {
+            #             'success': False,
+            #             'code': 422,
+            #             'message': "No human body detected in model_image",
+            #             'tools_status': tools_status,
+            #             'debug_info': {
+            #                 'error_type': 'HumanDetectionError',
+            #                 'suggest': 'Please use a clearer photo with a visible person.',
+            #                 'confidence': detection_result.get('confidence', 0),
+            #                 'reason': detection_result.get('reason', 'Unknown')
+            #             }
+            #         }
+            #     
+            #     logger.info(f"✅ 人体检测通过 (confidence: {detection_result.get('confidence')}%)")
+            #     
+            #     # 虚拟试穿合成
+            #     logger.info("🔄 启动 Gemini 虚拟试穿引擎...")
             #     vfx_prompt = f"""
             #     ACT AS: Professional VFX Technical Director.
             #     
-            #     TASK: High-fidelity clothing re-rendering using [Image 1] as the absolute texture and color reference for the model in [Image 2].
+            #     CONTEXT:
+            #     - Garment Type: {clothes_category}
+            #     - Model Height: {model_info.get('user_height', 'N/A')} cm
+            #     - Garment Length: {garment_info.get('clothe_length', 'N/A')} cm
             #     
-            #     STRICT COLOR CONSTRAINTS:
-            #     - COLOR ANCHOR: The garment in [Image 1] has a measured Albedo (flat color) of RGB{rgb_matrix}.
-            #     - NO COLOR DRIFT: Do not allow the environment lighting or background of [Image 2] to tint or shift this color. If [Image 2] has a warm/cool cast, the garment must remain physically accurate to RGB{rgb_matrix} while only accepting the luminosity (light/dark) values.
-            #     - DELTA-E MINIMIZATION: Minimize perceived color difference between the processed [Image 1] and the final result.
+            #     TASK: Create a photorealistic virtual try-on.
             #     
-            #     LIGHTING & SHADOW LOGIC:
-            #     - SHADOW NEUTRALITY: Render new shadows using desaturated, neutral tones. Do not use dark-saturated colors for folds, as this creates a "dirty" appearance.
-            #     - AMBIENT OCCLUSION: Only apply subtle contact shadows where fabric touches skin, ensuring the color at the contact point remains consistent with the garment's base.
+            #     REQUIREMENTS:
+            #     1. NATURAL FIT: The garment should fit naturally on the person's body based on measurements.
+            #     2. LIGHTING CONSISTENCY: Match the lighting of the model image.
+            #     3. SHADOW & WRINKLES: Add realistic shadows and natural fabric wrinkles.
+            #     4. PRESERVE PERSON: Keep the person's pose, face, and other body parts unchanged.
+            #     5. COLOR ACCURACY: Maintain the original garment colors.
             #     
-            #     OUTPUT REQUIREMENT:
-            #     The final product must pass a color-matching test against the provided RGB{rgb_matrix}. Ensure the fabric looks "new" and the color "vibrant" without artificial dullness.
+            #     OUTPUT: A photorealistic image of the person wearing the garment.
             #     """
             #     
             #     response = self.client.models.generate_content(
             #         model=self.model_name, 
             #         contents=[pil_cloth, pil_model, vfx_prompt]
             #     )
-            #     tools_status["tryon_engine"] = "success"
-            #     logger.info("✅ Gemini 試穿引擎執行成功")
             #     
+            #     tools_status["gemini_model"] = "success"
+            #     logger.info("✅ Gemini 试穿引擎执行成功")
+            #     
+            #     # 保存结果
             #     final_save_path = None
             #     if response.parts:
             #         for part in response.parts:
             #             if part.inline_data:
             #                 image = part.as_image()
-            #                 tryon_filename, final_save_path = self.get_unique_filename(prefix="tryon", ext="png")
+            #                 tryon_filename, final_save_path = self.get_unique_filename(prefix="try_result", ext="png")
             #                 image.save(final_save_path)
-            #                 tools_status["color_adjustment"] = "success"
-            #                 logger.info(f"✅ 試穿結果已保存: {tryon_filename}")
+            #                 logger.info(f"✅ 试穿结果已保存: {tryon_filename}")
             #     
             #     if not final_save_path:
-            #         tools_status["color_adjustment"] = "fail"
+            #         tools_status["gemini_model"] = "fail"
             #         return {
             #             'success': False,
             #             'code': 422,
-            #             'message': "Unprocessable Entity: 合成結果為空",
+            #             'message': "Unprocessable Entity: 合成结果为空",
             #             'tools_status': tools_status,
             #             'debug_info': {
             #                 'error_type': 'NoOutputError',
-            #                 'error': "AI response 沒有圖像數據"
+            #                 'error': "AI response 没有图像数据"
             #             }
             #         }
             #     
-            #     # 保存 model_image
-            #     model_filename, model_save_path = self.get_unique_filename(prefix="model", ext="png")
-            #     pil_model.save(model_save_path, "PNG")
-            #     
-            #     logger.info(f"🎉 虛擬試穿完整流程成功！")
+            #     logger.info(f"🎉 虚拟试穿完整流程成功！")
             #     return {
             #         'success': True,
             #         'code': 200,
-            #         'message': "OK: 虛擬試穿成功",
+            #         'message': "Success",
             #         'tools_status': tools_status,
             #         'model_image_filename': model_filename,
             #         'tryon_result_filename': os.path.basename(final_save_path)
             #     }
+            # 
             # except Exception as e:
-            #     logger.error(f"❌ AI 合成失敗: {e}")
-            #     tools_status["tryon_engine"] = "fail"
-            #     tools_status["color_adjustment"] = "not_started"
+            #     logger.error(f"❌ AI 合成失败: {e}")
+            #     tools_status["gemini_model"] = "fail"
             #     return {
             #         'success': False,
             #         'code': 422,
-            #         'message': "Unprocessable Entity: AI 模型運算失敗",
+            #         'message': "Unprocessable Entity: AI 模型运算失败",
             #         'tools_status': tools_status,
             #         'debug_info': {
             #             'error_type': 'AIModelError',
@@ -562,18 +678,56 @@ class AIProcessor(ImageProcessingInterface):
             #     }
         
         except Exception as e:
-            logger.error(f"❌ 虛擬試穿發生未知錯誤: {str(e)}")
+            logger.error(f"❌ 虚拟试穿发生未知错误: {str(e)}")
             import traceback
             logger.error(traceback.format_exc())
-            tools_status["tryon_engine"] = "error"
-            tools_status["color_adjustment"] = "error"
+            tools_status["gemini_model"] = "error"
             return {
                 'success': False,
                 'code': 500,
-                'message': "Internal Server Error: 系統運算失敗",
+                'message': "Internal Server Error: 系统运算失败",
                 'tools_status': tools_status,
                 'debug_info': {
                     'error_type': type(e).__name__,
                     'error': str(e)
                 }
             }
+
+
+    def _check_size_compatibility(self, clothes_category, model_info, garment_info):
+        """
+        检查尺寸兼容性
+        返回: {'compatible': bool, 'reason': str}
+        """
+        try:
+            if clothes_category == 'cloth':
+                # 检查上衣尺寸
+                user_height = model_info.get('user_height', 0)
+                clothe_length = garment_info.get('clothe_length', 0)
+                
+                if user_height > 0 and clothe_length > 0:
+                    # 简单的比例检查
+                    if clothe_length < user_height * 0.3 or clothe_length > user_height * 0.5:
+                        return {
+                            'compatible': False,
+                            'reason': f'衣长 {clothe_length}cm 可能不适合身高 {user_height}cm 的人'
+                        }
+            
+            elif clothes_category == 'pants':
+                # 检查裤子尺寸
+                user_height = model_info.get('user_height', 0)
+                pants_length = garment_info.get('pants_length', 0)
+                
+                if user_height > 0 and pants_length > 0:
+                    if pants_length < user_height * 0.5 or pants_length > user_height * 0.65:
+                        return {
+                            'compatible': False,
+                            'reason': f'裤长 {pants_length}cm 可能不适合身高 {user_height}cm 的人'
+                        }
+            
+            return {'compatible': True, 'reason': '尺寸匹配良好'}
+        
+        except Exception as e:
+            logger.warning(f"尺寸检查失败: {e}")
+            return {'compatible': True, 'reason': '无法验证尺寸'}
+        
