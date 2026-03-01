@@ -243,44 +243,73 @@ class AIProcessor(ImageProcessingInterface):
         ⚠️ TODO: 切換工具時只需修改此方法
         """
         # ========== 測試硬編碼版本（暫時） ==========
-        style_analysis = {
-            "clothes_category": "T-Shirt",
-            "style_name": "Casual",
-            "color_name": "Red"
-        }
-        return style_analysis, True, None
+        # style_analysis = {
+        #     "clothes_category": "T-Shirt",
+        #     "style_name": "Casual",
+        #     "color_name": "Red"
+        # }
+        # return style_analysis, True, None
         
-        # ========== 真實 Gemini API 版本（待啟用） ==========
-        # if self.client:
-        #     try:
-        #         pil_img = Image.open(image_path)
-        #         prompt = """
-        #         Analyze the clothing item in this image. Return JSON format:
-        #         {
-        #             "clothes_category": "specific type of garment (e.g., T-Shirt, Dress, Jacket)",
-        #             "style_name": "style category (e.g., Casual, Formal, Vintage, Streetwear)",
-        #             "color_name": "primary color name (e.g., Red, Blue, Black)"
-        #         }
-        #         """
-        #         response = self.client.models.generate_content(
-        #             model=self.consultant_model,
-        #             contents=[pil_img, prompt],
-        #             config=types.GenerateContentConfig(response_mime_type="application/json")
-        #         )
-        #         return json.loads(response.text), True, None
-        #     except Exception as e:
-        #         logger.warning(f"Gemini 風格分析失敗: {e}")
-        #         return {
-        #             "clothes_category": "Unknown",
-        #             "style_name": "Unknown",
-        #             "color_name": "Unknown"
-        #         }, False, str(e)
-        # else:
-        #     return {
-        #         "clothes_category": "Unknown",
-        #         "style_name": "Unknown",
-        #         "color_name": "Unknown"
-        #     }, False, "Client not initialized"
+        if self.client:
+            try:
+                pil_img = Image.open(image_path)
+                prompt = """
+                分析这件衣服，请用繁体中文回答，返回 JSON 格式：
+                
+                {
+                    "clothes_category": "选择一个: 長袖、短袖、裙子、褲子、外套",
+                    "style_names": ["风格1", "风格2", "风格3", ...],  // 最多6种风格，如果没那么多就少一点
+                    "color_names": ["颜色1", "颜色2", ...]  // 根据衣服颜色丰富度，至少1个，最多3个
+                }
+                
+                说明：
+                1. clothes_category: 必须从【長袖、短袖、裙子、褲子、外套】中选择一个
+                2. style_names: 描述衣服的风格，例如：休閒、正式、運動、街頭、復古、韓風、日系、歐美、學院、甜美、性感、簡約等，最多6种
+                3. color_names: 衣服上的主要颜色名称（繁体中文），如：紅色、藍色、黑色、白色、灰色、粉色、黃色、綠色、紫色、橙色、咖啡色、米色等
+                
+                注意：根据实际情况回答，不要凑数。如果风格单一就返回1-2个，如果颜色单调就返回1-2个。
+                """
+                
+                response = self.client.models.generate_content(
+                    model=self.consultant_model,
+                    contents=[pil_img, prompt],
+                    config=types.GenerateContentConfig(response_mime_type="application/json")
+                )
+                
+                result = json.loads(response.text)
+                
+                # 转换为旧格式兼容（保留 style_name 和 color_name）
+                style_analysis = {
+                    "clothes_category": result.get("clothes_category", "短袖"),
+                    "style_names": result.get("style_names", ["休閒"]),
+                    "color_names": result.get("color_names", ["白色"]),
+                    # 兼容旧字段（取第一个值）
+                    "style_name": result.get("style_names", ["休閒"])[0] if result.get("style_names") else "休閒",
+                    "color_name": result.get("color_names", ["白色"])[0] if result.get("color_names") else "白色"
+                }
+                
+                logger.info(f"✅ Gemini 风格分析成功: {style_analysis}")
+                return style_analysis, True, None
+                
+            except Exception as e:
+                error_msg = f"Gemini API 調用失敗: {str(e)}" if str(e) else "Gemini API 未初始化"
+                logger.warning(f"Gemini 風格分析失敗: {error_msg}")
+                return {
+                    "clothes_category": "短袖",
+                    "style_names": ["未知"],
+                    "color_names": ["未知"],
+                    "style_name": "未知",
+                    "color_name": "未知"
+                }, False, error_msg  # ← 返回中文错误信息
+        else:
+            logger.warning("Gemini Client 未初始化，使用默认值")
+            return {
+                "clothes_category": "短袖",
+                "style_names": ["未知"],
+                "color_names": ["未知"],
+                "style_name": "未知",
+                "color_name": "未知"
+            }, False, "Client not initialized"
 
     # ==========================================
     # [功能 1] 去背並提取顏色矩陣
@@ -397,26 +426,41 @@ class AIProcessor(ImageProcessingInterface):
                 }
             logger.info(f"✅ [Step 5/5] 颜色提取成功: {top_colors}")
 
+
             # ========== Step 6: 調用風格分析工具 ==========
             logger.info("🔄 [Bonus] 啟動 Gemini 風格分析...")
             style_analysis, success, error = self.analyze_clothing_style(save_path)
+            error_details = None  # 初始化错误详情
             if success:
                 tools_status["gemini_consultant"] = "success"
                 logger.info(f"✅ [Bonus] 風格分析成功: {style_analysis.get('clothes_category')} - {style_analysis.get('style_name')}")
             else:
                 tools_status["gemini_consultant"] = "fail"
                 logger.warning(f"⚠️ 風格分析失敗，使用默認值: {error}")
-
+                # 记录失败详情
+                error_details = {
+                    "failed_tool": "gemini_consultant",
+                    "error_type": "GeminiAPIError",
+                    "error_message": error if error else "Unknown error"
+                }
             # ========== 成功回傳 ==========
             logger.info(f"🎉 去背完整流程成功！")
+
+            # 根据是否有错误调整 message
+            if error_details:
+                message = "Partial Success: 部分工具失败，但已继续处理"
+            else:
+                message = "Processing Success"
+
             return {
                 'success': True,
                 'code': 200,
-                'message': "Processing Success",
+                'message': message,  # ← 動態設置
                 'tools_status': tools_status,
                 'file_name': filename,
                 'top_colors': top_colors,
-                'style_analysis': style_analysis
+                'style_analysis': style_analysis,
+                'error_details': error_details
             }
 
         except Exception as e:
