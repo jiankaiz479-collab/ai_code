@@ -39,35 +39,59 @@ class AIProcessor(ImageProcessingInterface):
         os.makedirs(settings.MEDIA_ROOT, exist_ok=True)
         return filename, save_path
 
+        # ==========================================
+    # [工具] 提取最大面积的前 N 个颜色
     # ==========================================
-    # [工具] OpenCV BGR 矩陣提取 (原始方法)
-    # ==========================================
-    def _extract_bgr_matrix(self, image_path):
+    def _extract_top_colors(self, image_path, top_n=3):
+        """
+        提取图片中最大面积的前 N 个颜色
+        返回: [[r1,g1,b1], [r2,g2,b2], [r3,g3,b3]]
+        """
         try:
             img = cv2.imread(image_path, cv2.IMREAD_UNCHANGED)
-            if img is None or img.shape[2] < 4: return [200, 200, 200]
-
+            if img is None or img.shape[2] < 4:
+                return [[255, 255, 255]] * top_n
+            
+            # 分离通道
             b, g, r, a = cv2.split(img)
+            
+            # 创建有效像素遮罩
             kernel = np.ones((5,5), np.uint8)
-            inner_mask = cv2.erode(a, kernel, iterations=2) 
+            inner_mask = cv2.erode(a, kernel, iterations=2)
             
-            bgr_tmp = cv2.merge([b, g, r])
-            hsv = cv2.cvtColor(bgr_tmp, cv2.COLOR_BGR2HSV)
-            v_channel = hsv[:, :, 2]
-
-            physical_mask = (inner_mask > 0) & (v_channel > 50) & (v_channel < 220)
+            # 转换为 RGB
+            rgb_img = cv2.merge([r, g, b])
             
-            if not np.any(physical_mask): return [255, 192, 203]
-
-            mean_b = np.median(b[physical_mask])
-            mean_g = np.median(g[physical_mask])
-            mean_r = np.median(r[physical_mask])
+            # 只处理非透明区域
+            valid_pixels = rgb_img[inner_mask > 0]
             
-            return [int(mean_r), int(mean_g), int(mean_b)]
+            if len(valid_pixels) == 0:
+                return [[255, 255, 255]] * top_n
+            
+            # 将像素重塑为二维数组
+            pixels = valid_pixels.reshape(-1, 3).astype(np.float32)
+            
+            # 使用 K-means 聚类找出主要颜色
+            criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 100, 0.2)
+            _, labels, centers = cv2.kmeans(pixels, top_n, None, criteria, 10, cv2.KMEANS_PP_CENTERS)
+            
+            # 统计每个颜色簇的像素数量
+            unique, counts = np.unique(labels, return_counts=True)
+            
+            # 按面积排序
+            sorted_indices = np.argsort(-counts)
+            
+            # 提取前 N 个颜色
+            top_colors = []
+            for idx in sorted_indices[:top_n]:
+                color = centers[idx].astype(int)
+                top_colors.append([int(color[0]), int(color[1]), int(color[2])])
+            
+            return top_colors
+            
         except Exception as e:
-            logger.error(f"色彩矩陣提取失敗: {e}")
-            return [255, 255, 255]
-
+            logger.error(f"颜色提取失败: {e}")
+            return [[255, 255, 255]] * top_n
     # ==========================================
     # [後期開發] 語意遮罩生成 (原始方法)
     # ==========================================
@@ -192,20 +216,21 @@ class AIProcessor(ImageProcessingInterface):
             logger.error(f"OpenCV 磨皮失敗: {e}")
             return None, False, str(e)
 
+
     # ==========================================
-    # [工具方法] 顏色矩陣提取 (可切換)
+    # [工具方法] 颜色提取 (可切换)
     # ==========================================
-    def extract_color_matrix(self, image_path):
+    def extract_top_colors(self, image_path, top_n=3):
         """
-        顏色提取工具方法
-        返回: (rgb_matrix: list, success: bool, error: str)
-        ⚠️ TODO: 切換工具時只需修改此方法
+        颜色提取工具方法 - 提取最大面积的前 N 个颜色
+        返回: (top_colors: list, success: bool, error: str)
+        ⚠️ TODO: 切换工具时只需修改此方法
         """
         try:
-            rgb_matrix = self._extract_bgr_matrix(image_path)
-            return rgb_matrix, True, None
+            top_colors = self._extract_top_colors(image_path, top_n)
+            return top_colors, True, None
         except Exception as e:
-            logger.error(f"顏色提取失敗: {e}")
+            logger.error(f"颜色提取失败: {e}")
             return None, False, str(e)
 
     # ==========================================
@@ -356,8 +381,8 @@ class AIProcessor(ImageProcessingInterface):
             logger.info(f"✅ [Step 4/5] 圖片已保存: {filename}")
 
             # ========== Step 5: 調用顏色提取工具 ==========
-            logger.info("🔄 [Step 5/5] 提取顏色矩陣...")
-            rgb_matrix, success, error = self.extract_color_matrix(save_path)
+            logger.info("🔄 [Step 5/5] 提取最大面积的3个颜色...")
+            top_colors, success, error = self.extract_top_colors(save_path, top_n=3)
             if not success:
                 logger.error(f"❌ 顏色提取失敗: {error}")
                 return {
@@ -370,7 +395,7 @@ class AIProcessor(ImageProcessingInterface):
                         'error': error
                     }
                 }
-            logger.info(f"✅ [Step 5/5] 顏色矩陣提取成功: RGB{rgb_matrix}")
+            logger.info(f"✅ [Step 5/5] 颜色提取成功: {top_colors}")
 
             # ========== Step 6: 調用風格分析工具 ==========
             logger.info("🔄 [Bonus] 啟動 Gemini 風格分析...")
@@ -390,7 +415,7 @@ class AIProcessor(ImageProcessingInterface):
                 'message': "Processing Success",
                 'tools_status': tools_status,
                 'file_name': filename,
-                'rgb_matrix': rgb_matrix,
+                'top_colors': top_colors,
                 'style_analysis': style_analysis
             }
 

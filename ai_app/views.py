@@ -96,7 +96,7 @@ class RemoveBgView(View):
                         "file_name": file_name,
                         "file_format": "PNG",
                         "style_analysis": result.get('style_analysis', {}),
-                        "rgb_matrix": result.get('rgb_matrix')
+                        "top_colors": result.get('top_colors')
                     }
                 }
                 
