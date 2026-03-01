@@ -401,45 +401,149 @@ class AIProcessor(ImageProcessingInterface):
     def virtual_try_on(self, model_image, clean_clothes_path, rgb_matrix):
         """
         此函式現在直接接收由 remove_background 產出的 path 與 matrix
+        返回結構：
+        {
+            'success': True/False,
+            'code': 200/422/500,
+            'message': str,
+            'tools_status': {...},
+            'model_image_filename': str,
+            'tryon_result_filename': str,
+            'debug_info': {...}  # 仅失败时
+        }
+        ⚠️ TODO: 正式上線時，刪除硬編碼部分，換成真實 Gemini API 調用
         """
-        if not self.client: raise ValueError("Gemini Client 未初始化")
-        
-        pil_model = Image.open(model_image)
-        pil_cloth = Image.open(clean_clothes_path)
-        
-        # 利用傳入的 rgb_matrix 鎖定渲染顏色，防止失真
-        vfx_prompt = f"""
-        ACT AS: Professional VFX Technical Director.
-        
-        TASK: High-fidelity clothing re-rendering using [Image 1] as the absolute texture and color reference for the model in [Image 2].
-        
-        STRICT COLOR CONSTRAINTS:
-        - COLOR ANCHOR: The garment in [Image 1] has a measured Albedo (flat color) of RGB{rgb_matrix}.
-        - NO COLOR DRIFT: Do not allow the environment lighting or background of [Image 2] to tint or shift this color. If [Image 2] has a warm/cool cast, the garment must remain physically accurate to RGB{rgb_matrix} while only accepting the luminosity (light/dark) values.
-        - DELTA-E MINIMIZATION: Minimize perceived color difference between the processed [Image 1] and the final result.
-        
-        LIGHTING & SHADOW LOGIC:
-        - SHADOW NEUTRALITY: Render new shadows using desaturated, neutral tones. Do not use dark-saturated colors for folds, as this creates a "dirty" appearance.
-        - AMBIENT OCCLUSION: Only apply subtle contact shadows where fabric touches skin, ensuring the color at the contact point remains consistent with the garment's base.
-        
-        OUTPUT REQUIREMENT:
-        The final product must pass a color-matching test against the provided RGB{rgb_matrix}. Ensure the fabric looks "new" and the color "vibrant" without artificial dullness.
-        """
+        tools_status = {
+            "ai_model": "not_started",
+            "frame_boundary": "not_started",
+            "human_detection": "not_started"
+        }
         
         try:
-            response = self.client.models.generate_content(
-                model=self.model_name, 
-                contents=[pil_cloth, pil_model, vfx_prompt]
-            )
-            final_save_path = None
-            if response.parts:
-                for part in response.parts:
-                    if part.inline_data:
-                        image = part.as_image()
-                        _, final_save_path = self.get_unique_filename(prefix="final", ext="png")
-                        image.save(final_save_path)
+            # ========== 測試硬編碼版本（暫時） ==========
+            pil_model = Image.open(model_image)
+            pil_cloth = Image.open(clean_clothes_path)
             
-            return final_save_path, f"Color Lock Enabled: RGB{rgb_matrix}"
+            # 保存 model_image
+            model_filename, model_save_path = self.get_unique_filename(prefix="model", ext="png")
+            pil_model.save(model_save_path, "PNG")
+            tools_status["ai_model"] = "success"
+            tools_status["frame_boundary"] = "success"
+            tools_status["human_detection"] = "success"
+            
+            # 保存試穿結果（暫時用衣服圖作為試穿結果的代替）
+            tryon_filename, tryon_save_path = self.get_unique_filename(prefix="tryon", ext="png")
+            pil_cloth.save(tryon_save_path, "PNG")
+            
+            logger.info(f"✅ 虛擬試穿成功（測試模式）: model={model_filename}, result={tryon_filename}")
+            return {
+                'success': True,
+                'code': 200,
+                'message': "OK: 虛擬試穿成功",
+                'tools_status': tools_status,
+                'model_image_filename': model_filename,
+                'tryon_result_filename': tryon_filename
+            }
+            
+            # ========== 真實 Gemini API 版本（待啟用） ==========
+            # if not self.client:
+            #     return {
+            #         'success': False,
+            #         'code': 500,
+            #         'message': "Internal Server Error: AI 模型運算失敗",
+            #         'tools_status': tools_status,
+            #         'debug_info': {
+            #             'error_type': 'ClientNotInitialized',
+            #             'error': "Gemini Client 未初始化"
+            #         }
+            #     }
+            # 
+            # try:
+            #     pil_model = Image.open(model_image)
+            #     pil_cloth = Image.open(clean_clothes_path)
+            #     
+            #     vfx_prompt = f"""
+            #     ACT AS: Professional VFX Technical Director.
+            #     
+            #     TASK: High-fidelity clothing re-rendering using [Image 1] as the absolute texture and color reference for the model in [Image 2].
+            #     
+            #     STRICT COLOR CONSTRAINTS:
+            #     - COLOR ANCHOR: The garment in [Image 1] has a measured Albedo (flat color) of RGB{rgb_matrix}.
+            #     - NO COLOR DRIFT: Do not allow the environment lighting or background of [Image 2] to tint or shift this color. If [Image 2] has a warm/cool cast, the garment must remain physically accurate to RGB{rgb_matrix} while only accepting the luminosity (light/dark) values.
+            #     - DELTA-E MINIMIZATION: Minimize perceived color difference between the processed [Image 1] and the final result.
+            #     
+            #     LIGHTING & SHADOW LOGIC:
+            #     - SHADOW NEUTRALITY: Render new shadows using desaturated, neutral tones. Do not use dark-saturated colors for folds, as this creates a "dirty" appearance.
+            #     - AMBIENT OCCLUSION: Only apply subtle contact shadows where fabric touches skin, ensuring the color at the contact point remains consistent with the garment's base.
+            #     
+            #     OUTPUT REQUIREMENT:
+            #     The final product must pass a color-matching test against the provided RGB{rgb_matrix}. Ensure the fabric looks "new" and the color "vibrant" without artificial dullness.
+            #     """
+            #     
+            #     response = self.client.models.generate_content(
+            #         model=self.model_name, 
+            #         contents=[pil_cloth, pil_model, vfx_prompt]
+            #     )
+            #     tools_status["ai_model"] = "success"
+            #     
+            #     final_save_path = None
+            #     if response.parts:
+            #         for part in response.parts:
+            #             if part.inline_data:
+            #                 image = part.as_image()
+            #                 tryon_filename, final_save_path = self.get_unique_filename(prefix="tryon", ext="png")
+            #                 image.save(final_save_path)
+            #                 tools_status["frame_boundary"] = "success"
+            #                 tools_status["human_detection"] = "success"
+            #     
+            #     if not final_save_path:
+            #         return {
+            #             'success': False,
+            #             'code': 422,
+            #             'message': "Unprocessable Entity: 合成結果為空",
+            #             'tools_status': tools_status,
+            #             'debug_info': {
+            #                 'error_type': 'NoOutputError',
+            #                 'error': "AI response 沒有圖像數據"
+            #             }
+            #         }
+            #     
+            #     # 保存 model_image
+            #     model_filename, model_save_path = self.get_unique_filename(prefix="model", ext="png")
+            #     pil_model.save(model_save_path, "PNG")
+            #     
+            #     logger.info(f"✅ 虛擬試穿成功: model={model_filename}, result={os.path.basename(final_save_path)}")
+            #     return {
+            #         'success': True,
+            #         'code': 200,
+            #         'message': "OK: 虛擬試穿成功",
+            #         'tools_status': tools_status,
+            #         'model_image_filename': model_filename,
+            #         'tryon_result_filename': os.path.basename(final_save_path)
+            #     }
+            # except Exception as e:
+            #     logger.error(f"AI 合成失敗: {e}")
+            #     tools_status["ai_model"] = "fail"
+            #     return {
+            #         'success': False,
+            #         'code': 422,
+            #         'message': "Unprocessable Entity: AI 模型運算失敗",
+            #         'tools_status': tools_status,
+            #         'debug_info': {
+            #             'error_type': 'AIModelError',
+            #             'error': str(e)
+            #         }
+            #     }
+        
         except Exception as e:
-            logger.error(f"合成失敗: {e}")
-            raise e
+            logger.error(f"❌ 虛擬試穿發生未知錯誤: {str(e)}")
+            return {
+                'success': False,
+                'code': 500,
+                'message': "Internal Server Error: AI 模型運算失敗",
+                'tools_status': tools_status,
+                'debug_info': {
+                    'error_type': type(e).__name__,
+                    'error': str(e)
+                }
+            }
