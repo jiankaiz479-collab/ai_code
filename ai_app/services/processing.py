@@ -39,8 +39,8 @@ class AIProcessor(ImageProcessingInterface):
         os.makedirs(settings.MEDIA_ROOT, exist_ok=True)
         return filename, save_path
 
-        # ==========================================
-    # [工具] 提取最大面积的前 N 个颜色
+    # ==========================================
+    # [工具] 提取最大面积的前 N 个颜色（保留方法，但不使用）
     # ==========================================
     def _extract_top_colors(self, image_path, top_n=3):
         """
@@ -92,6 +92,7 @@ class AIProcessor(ImageProcessingInterface):
         except Exception as e:
             logger.error(f"颜色提取失败: {e}")
             return [[255, 255, 255]] * top_n
+    
     # ==========================================
     # [後期開發] 語意遮罩生成 (原始方法)
     # ==========================================
@@ -216,9 +217,8 @@ class AIProcessor(ImageProcessingInterface):
             logger.error(f"OpenCV 磨皮失敗: {e}")
             return None, False, str(e)
 
-
     # ==========================================
-    # [工具方法] 颜色提取 (可切换)
+    # [工具方法] 颜色提取 (保留但不使用)
     # ==========================================
     def extract_top_colors(self, image_path, top_n=3):
         """
@@ -238,54 +238,78 @@ class AIProcessor(ImageProcessingInterface):
     # ==========================================
     def analyze_clothing_style(self, image_path):
         """
-        風格分析工具方法
+        風格分析工具方法 - 严格按照API文档返回
         返回: (style_analysis: dict, success: bool, error: str)
         ⚠️ TODO: 切換工具時只需修改此方法
         """
-        # ========== 測試硬編碼版本（暫時） ==========
-        # style_analysis = {
-        #     "clothes_category": "T-Shirt",
-        #     "style_name": "Casual",
-        #     "color_name": "Red"
-        # }
-        # return style_analysis, True, None
+        # # ========== 測試硬編碼版本（暫時） ==========
+        # # 🔧 如果要测试失败情况，改 TEST_SUCCESS = False
+        # TEST_SUCCESS = True
         
+        # if TEST_SUCCESS:
+        #     style_analysis = {
+        #         "clothes_category": "T-shirt",
+        #         "style_name": "Casual",
+        #         "color_name": "Red"
+        #     }
+        #     return style_analysis, True, None
+        # else:
+        #     # 模拟失败情况
+        #     style_analysis = {
+        #         "clothes_category": "failed",
+        #         "style_name": "failed",
+        #         "color_name": "failed"
+        #     }
+        #     return style_analysis, False, "Test failure mode"
+        
+        # ========== 實際 Gemini API 版本（待啟用） ==========
         if self.client:
             try:
                 pil_img = Image.open(image_path)
                 prompt = """
-                分析这件衣服，请用繁体中文回答，返回 JSON 格式：
-                
+                Analyze the clothing item in this image. Provide the analysis in English and return ONLY a JSON object.
+
+                【STRICT CATEGORY RULE】:
+                You MUST choose EXACTLY one category from this list:
+                - "short": All tops (T-shirts, blouses, sweaters, hoodies, long/short sleeves).
+                - "pants": All trousers and shorts (jeans, leggings, sweatpants).
+                - "outerwear": Jackets, coats, blazers, vests.
+                - "intimates": Underwear, bras, sleepwear.
+                - "skirt": All types of skirts (mini, midi, maxi).
+                - "others": Dresses, accessories, or items not fitting above.
+
+                【PURE AESTHETIC STYLE RULE】:
+                - "style_name": Identify the fashion aesthetic or genre (e.g., Casual, Formal, Sporty, Streetwear, Vintage, Korean Style, Japanese Style, Preppy, Sweet, Sexy, Minimalist).
+                - Min 3 tags. DO NOT include physical descriptions like "oversized", "slim-fit", or "long-sleeve".
+                - Provide 1-2 tags if the style is simple.
+
+                【COLOR RULE】:
+                - "color_name": List up to 3 dominant color names in English (e.g., Red, Blue, Black, White, Gray).
+
+                JSON Structure:
                 {
-                    "clothes_category": "选择一个: 長袖、短袖、裙子、褲子、外套",
-                    "style_names": ["风格1", "风格2", "风格3", ...],  // 最多6种风格，如果没那么多就少一点
-                    "color_names": ["颜色1", "颜色2", ...]  // 根据衣服颜色丰富度，至少1个，最多3个
+                "clothes_category": "Selected Category",
+                "style_name": ["Style1", "Style2", ...],
+                "color_name": ["Color1", "Color2", ...]
                 }
-                
-                说明：
-                1. clothes_category: 必须从【長袖、短袖、裙子、褲子、外套】中选择一个
-                2. style_names: 描述衣服的风格，例如：休閒、正式、運動、街頭、復古、韓風、日系、歐美、學院、甜美、性感、簡約等，最多6种
-                3. color_names: 衣服上的主要颜色名称（繁体中文），如：紅色、藍色、黑色、白色、灰色、粉色、黃色、綠色、紫色、橙色、咖啡色、米色等
-                
-                注意：根据实际情况回答，不要凑数。如果风格单一就返回1-2个，如果颜色单调就返回1-2个。
-                """
+
+                Note: Answer based on the actual visual features. Do not force multiple tags if the item is plain.
+        """
                 
                 response = self.client.models.generate_content(
                     model=self.consultant_model,
                     contents=[pil_img, prompt],
-                    config=types.GenerateContentConfig(response_mime_type="application/json")
+                    config=types.GenerateContentConfig(
+                        response_mime_type="application/json",
+                        temperature=0.1  # 設定為 0.1 可以讓結果變得非常固定
+                    )
                 )
                 
                 result = json.loads(response.text)
-                
-                # 转换为旧格式兼容（保留 style_name 和 color_name）
                 style_analysis = {
-                    "clothes_category": result.get("clothes_category", "短袖"),
-                    "style_names": result.get("style_names", ["休閒"]),
-                    "color_names": result.get("color_names", ["白色"]),
-                    # 兼容旧字段（取第一个值）
-                    "style_name": result.get("style_names", ["休閒"])[0] if result.get("style_names") else "休閒",
-                    "color_name": result.get("color_names", ["白色"])[0] if result.get("color_names") else "白色"
+                    "clothes_category": result.get("clothes_category", "other"),
+                    "style_name": result.get("style_name", "Unknown"),
+                    "color_name": result.get("color_name", "Unknown")
                 }
                 
                 logger.info(f"✅ Gemini 风格分析成功: {style_analysis}")
@@ -294,38 +318,39 @@ class AIProcessor(ImageProcessingInterface):
             except Exception as e:
                 error_msg = f"Gemini API 調用失敗: {str(e)}" if str(e) else "Gemini API 未初始化"
                 logger.warning(f"Gemini 風格分析失敗: {error_msg}")
-                return {
-                    "clothes_category": "短袖",
-                    "style_names": ["未知"],
-                    "color_names": ["未知"],
-                    "style_name": "未知",
-                    "color_name": "未知"
-                }, False, error_msg  # ← 返回中文错误信息
+                
+                # ✅ 失败时返回 "failed"
+                style_analysis = {
+                    "clothes_category": "failed",
+                    "style_name": "failed",
+                    "color_name": "failed"
+                }
+                return style_analysis, False, error_msg
         else:
-            logger.warning("Gemini Client 未初始化，使用默认值")
-            return {
-                "clothes_category": "短袖",
-                "style_names": ["未知"],
-                "color_names": ["未知"],
-                "style_name": "未知",
-                "color_name": "未知"
-            }, False, "Client not initialized"
+            logger.warning("Gemini Client 未初始化")
+            
+            # ✅ 失败时返回 "failed"
+            style_analysis = {
+                "clothes_category": "failed",
+                "style_name": "failed",
+                "color_name": "failed"
+            }
+            return style_analysis, False, "Client not initialized"
 
     # ==========================================
-    # [功能 1] 去背並提取顏色矩陣
+    # [功能 1] 去背並分析風格
     # ==========================================
     def remove_background(self, clothes_image):
         """
-        返回結構：
+        返回結構（严格按照API文档）：
         {
             'success': True/False,
-            'code': 200/400/415/422/500,
+            'code': 200/422/500,
             'message': str,
-            'tools_status': {...},  # 字典，不是列表
+            'tools_status': {...},
             'file_name': str,
-            'rgb_matrix': [r, g, b],
             'style_analysis': {...},
-            'debug_info': {...}  # 仅失败时
+            'error_details': {...}  # 只有工具失败时才包含
         }
         """
         tools_status = {
@@ -341,7 +366,7 @@ class AIProcessor(ImageProcessingInterface):
             input_img = Image.open(clothes_image).convert("RGBA")
             
             # ========== Step 1: 調用 Rembg 去背工具 ==========
-            logger.info("🔄 [Step 1/5] 啟動 Rembg 去背引擎...")
+            logger.info("🔄 [Step 1/4] 啟動 Rembg 去背引擎...")
             output_img, success, error = self.remove_bg_with_rembg(input_img)
             if not success:
                 tools_status["rembg_engine"] = "fail"
@@ -358,10 +383,10 @@ class AIProcessor(ImageProcessingInterface):
                     }
                 }
             tools_status["rembg_engine"] = "success"
-            logger.info("✅ [Step 1/5] Rembg 去背成功")
+            logger.info("✅ [Step 1/4] Rembg 去背成功")
             
             # ========== Step 2: 調用清晰度檢測工具 ==========
-            logger.info("🔄 [Step 2/5] 檢測圖片清晰度...")
+            logger.info("🔄 [Step 2/4] 檢測圖片清晰度...")
             is_clear, score, _ = self.check_image_blur(output_img, threshold=50.0)
             if not is_clear:
                 logger.warning(f"⚠️ 圖片清晰度不足: {score:.2f}")
@@ -377,10 +402,10 @@ class AIProcessor(ImageProcessingInterface):
                         'suggest': "Please retake the photo in a brighter environment or stabilize your camera."
                     }
                 }
-            logger.info(f"✅ [Step 2/5] 清晰度檢測通過 (score: {score:.2f})")
+            logger.info(f"✅ [Step 2/4] 清晰度檢測通過 (score: {score:.2f})")
             
             # ========== Step 3: 調用 OpenCV 磨皮工具 ==========
-            logger.info("🔄 [Step 3/5] 啟動 OpenCV 磨皮引擎...")
+            logger.info("🔄 [Step 3/4] 啟動 OpenCV 磨皮引擎...")
             r, g, b, a = output_img.split()
             rgb_img = Image.merge('RGB', (r, g, b))
             smoothed_rgb, success, error = self.smooth_fabric_with_opencv(rgb_img)
@@ -398,70 +423,50 @@ class AIProcessor(ImageProcessingInterface):
                     }
                 }
             tools_status["opencv_masking"] = "success"
-            logger.info("✅ [Step 3/5] OpenCV 磨皮成功")
+            logger.info("✅ [Step 3/4] OpenCV 磨皮成功")
 
-            # ========== Step 4: 保存圖片並提取顏色 ==========
-            logger.info("🔄 [Step 4/5] 保存處理後的圖片...")
+            # ========== Step 4: 保存圖片 ==========
+            logger.info("🔄 [Step 4/4] 保存處理後的圖片...")
             final_output = Image.merge('RGBA', (*smoothed_rgb.split(), a))
             final_output = ImageEnhance.Contrast(final_output).enhance(0.85)
             
             filename, save_path = self.get_unique_filename(prefix="processed", ext="png")
             final_output.save(save_path, "PNG")
-            logger.info(f"✅ [Step 4/5] 圖片已保存: {filename}")
+            logger.info(f"✅ [Step 4/4] 圖片已保存: {filename}")
 
-            # ========== Step 5: 調用顏色提取工具 ==========
-            logger.info("🔄 [Step 5/5] 提取最大面积的3个颜色...")
-            top_colors, success, error = self.extract_top_colors(save_path, top_n=3)
-            if not success:
-                logger.error(f"❌ 顏色提取失敗: {error}")
-                return {
-                    'success': False,
-                    'code': 422,
-                    'message': "Unprocessable Entity: 顏色提取失敗",
-                    'tools_status': tools_status,
-                    'debug_info': {
-                        'error_type': 'ColorExtractionError',
-                        'error': error
-                    }
-                }
-            logger.info(f"✅ [Step 5/5] 颜色提取成功: {top_colors}")
-
-
-            # ========== Step 6: 調用風格分析工具 ==========
+            # ========== Bonus: 調用風格分析工具 ==========
             logger.info("🔄 [Bonus] 啟動 Gemini 風格分析...")
             style_analysis, success, error = self.analyze_clothing_style(save_path)
-            error_details = None  # 初始化错误详情
+            
             if success:
                 tools_status["gemini_consultant"] = "success"
                 logger.info(f"✅ [Bonus] 風格分析成功: {style_analysis.get('clothes_category')} - {style_analysis.get('style_name')}")
             else:
                 tools_status["gemini_consultant"] = "fail"
-                logger.warning(f"⚠️ 風格分析失敗，使用默認值: {error}")
-                # 记录失败详情
-                error_details = {
+                logger.warning(f"⚠️ 風格分析失敗: {error}")
+            
+            # ========== 成功回傳（动态构建） ==========
+            logger.info(f"🎉 去背完整流程成功！")
+
+            # 基础返回结构（严格按照 API 文档）
+            result = {
+                'success': True,
+                'code': 200,
+                'message': "Processing Success",
+                'tools_status': tools_status,
+                'file_name': filename,
+                'style_analysis': style_analysis
+            }
+
+            # ✅ 只有当有工具失败时才动态添加 error_details
+            if tools_status["gemini_consultant"] == "fail":
+                result['error_details'] = {
                     "failed_tool": "gemini_consultant",
                     "error_type": "GeminiAPIError",
                     "error_message": error if error else "Unknown error"
                 }
-            # ========== 成功回傳 ==========
-            logger.info(f"🎉 去背完整流程成功！")
 
-            # 根据是否有错误调整 message
-            if error_details:
-                message = "Partial Success: 部分工具失败，但已继续处理"
-            else:
-                message = "Processing Success"
-
-            return {
-                'success': True,
-                'code': 200,
-                'message': message,  # ← 動態設置
-                'tools_status': tools_status,
-                'file_name': filename,
-                'top_colors': top_colors,
-                'style_analysis': style_analysis,
-                'error_details': error_details
-            }
+            return result
 
         except Exception as e:
             logger.error(f"❌ 去背發生未知錯誤: {str(e)}")
@@ -479,8 +484,8 @@ class AIProcessor(ImageProcessingInterface):
             }
 
     # ==========================================
-# [功能 2] 虚拟试穿 (独立功能，不继承去背状态)
-# ==========================================
+    # [功能 2] 虚拟试穿 (独立功能，不继承去背状态)
+    # ==========================================
     def virtual_try_on(self, model_image, clean_clothes_path, 
                     clothes_category='cloth', model_info=None, garment_info=None):
         """
@@ -621,130 +626,6 @@ class AIProcessor(ImageProcessingInterface):
                 'model_image_filename': model_filename,
                 'tryon_result_filename': tryon_filename
             }
-            
-            # ========== 真实 Gemini API 版本（待启用） ==========
-            # if not self.client:
-            #     tools_status["gemini_model"] = "error"
-            #     return {
-            #         'success': False,
-            #         'code': 500,
-            #         'message': "Internal Server Error: AI 模型未初始化",
-            #         'tools_status': tools_status,
-            #         'debug_info': {
-            #             'error_type': 'ClientNotInitialized',
-            #             'error': "Gemini Client 未初始化"
-            #         }
-            #     }
-            # 
-            # try:
-            #     # 人体检测（使用 Gemini）
-            #     logger.info("🔄 检测人体...")
-            #     detection_prompt = """
-            #     Analyze if there is a clear, full human body visible in this image.
-            #     The person should be standing and clearly visible.
-            #     Return JSON: {"has_human": true/false, "confidence": 0-100, "reason": "explanation"}
-            #     """
-            #     detection_response = self.client.models.generate_content(
-            #         model=self.consultant_model,
-            #         contents=[pil_model, detection_prompt],
-            #         config=types.GenerateContentConfig(response_mime_type="application/json")
-            #     )
-            #     detection_result = json.loads(detection_response.text)
-            #     
-            #     if not detection_result.get('has_human') or detection_result.get('confidence', 0) < 70:
-            #         tools_status["gemini_model"] = "not_started"
-            #         logger.warning(f"⚠️ 未检测到清晰的人体: {detection_result.get('reason')}")
-            #         return {
-            #             'success': False,
-            #             'code': 422,
-            #             'message': "No human body detected in model_image",
-            #             'tools_status': tools_status,
-            #             'debug_info': {
-            #                 'error_type': 'HumanDetectionError',
-            #                 'suggest': 'Please use a clearer photo with a visible person.',
-            #                 'confidence': detection_result.get('confidence', 0),
-            #                 'reason': detection_result.get('reason', 'Unknown')
-            #             }
-            #         }
-            #     
-            #     logger.info(f"✅ 人体检测通过 (confidence: {detection_result.get('confidence')}%)")
-            #     
-            #     # 虚拟试穿合成
-            #     logger.info("🔄 启动 Gemini 虚拟试穿引擎...")
-            #     vfx_prompt = f"""
-            #     ACT AS: Professional VFX Technical Director.
-            #     
-            #     CONTEXT:
-            #     - Garment Type: {clothes_category}
-            #     - Model Height: {model_info.get('user_height', 'N/A')} cm
-            #     - Garment Length: {garment_info.get('clothe_length', 'N/A')} cm
-            #     
-            #     TASK: Create a photorealistic virtual try-on.
-            #     
-            #     REQUIREMENTS:
-            #     1. NATURAL FIT: The garment should fit naturally on the person's body based on measurements.
-            #     2. LIGHTING CONSISTENCY: Match the lighting of the model image.
-            #     3. SHADOW & WRINKLES: Add realistic shadows and natural fabric wrinkles.
-            #     4. PRESERVE PERSON: Keep the person's pose, face, and other body parts unchanged.
-            #     5. COLOR ACCURACY: Maintain the original garment colors.
-            #     
-            #     OUTPUT: A photorealistic image of the person wearing the garment.
-            #     """
-            #     
-            #     response = self.client.models.generate_content(
-            #         model=self.model_name, 
-            #         contents=[pil_cloth, pil_model, vfx_prompt]
-            #     )
-            #     
-            #     tools_status["gemini_model"] = "success"
-            #     logger.info("✅ Gemini 试穿引擎执行成功")
-            #     
-            #     # 保存结果
-            #     final_save_path = None
-            #     if response.parts:
-            #         for part in response.parts:
-            #             if part.inline_data:
-            #                 image = part.as_image()
-            #                 tryon_filename, final_save_path = self.get_unique_filename(prefix="try_result", ext="png")
-            #                 image.save(final_save_path)
-            #                 logger.info(f"✅ 试穿结果已保存: {tryon_filename}")
-            #     
-            #     if not final_save_path:
-            #         tools_status["gemini_model"] = "fail"
-            #         return {
-            #             'success': False,
-            #             'code': 422,
-            #             'message': "Unprocessable Entity: 合成结果为空",
-            #             'tools_status': tools_status,
-            #             'debug_info': {
-            #                 'error_type': 'NoOutputError',
-            #                 'error': "AI response 没有图像数据"
-            #             }
-            #         }
-            #     
-            #     logger.info(f"🎉 虚拟试穿完整流程成功！")
-            #     return {
-            #         'success': True,
-            #         'code': 200,
-            #         'message': "Success",
-            #         'tools_status': tools_status,
-            #         'model_image_filename': model_filename,
-            #         'tryon_result_filename': os.path.basename(final_save_path)
-            #     }
-            # 
-            # except Exception as e:
-            #     logger.error(f"❌ AI 合成失败: {e}")
-            #     tools_status["gemini_model"] = "fail"
-            #     return {
-            #         'success': False,
-            #         'code': 422,
-            #         'message': "Unprocessable Entity: AI 模型运算失败",
-            #         'tools_status': tools_status,
-            #         'debug_info': {
-            #             'error_type': 'AIModelError',
-            #             'error': str(e)
-            #         }
-            #     }
         
         except Exception as e:
             logger.error(f"❌ 虚拟试穿发生未知错误: {str(e)}")
@@ -761,7 +642,6 @@ class AIProcessor(ImageProcessingInterface):
                     'error': str(e)
                 }
             }
-
 
     def _check_size_compatibility(self, clothes_category, model_info, garment_info):
         """
@@ -799,4 +679,3 @@ class AIProcessor(ImageProcessingInterface):
         except Exception as e:
             logger.warning(f"尺寸检查失败: {e}")
             return {'compatible': True, 'reason': '无法验证尺寸'}
-        

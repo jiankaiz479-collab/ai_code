@@ -87,19 +87,22 @@ class RemoveBgView(View):
                 
                 logger.info(f"✅ [RemoveBg] 處理成功: {file_name}")
                 
-                # 直接使用 processing 返回的數據
+                # 构建基础响应数据（严格按照 API 文档）
                 analysis_data = {
                     "code": 200,
-                    "message": result.get('message', "Processing Success"),  # 使用动态消息
+                    "message": result.get('message', "Processing Success"),
                     "tools_status": result.get('tools_status', {}),
-                    "error_details": result.get('error_details'),  # 新增：失败原因
                     "data": {
                         "file_name": file_name,
                         "file_format": "PNG",
-                        "style_analysis": result.get('style_analysis', {}),
-                        "top_colors": result.get('top_colors')
+                        "style_analysis": result.get('style_analysis', {})
+                        # ❌ 删除: "top_colors": result.get('top_colors')
                     }
                 }
+                
+                # ✅ 只有当 processing 返回了 error_details 时才动态添加
+                if result.get('error_details'):
+                    analysis_data['error_details'] = result['error_details']
                                 
                 boundary = 'bg_removal_boundary'
                 response_body = []
@@ -108,7 +111,7 @@ class RemoveBgView(View):
                 response_body.append(f'--{boundary}\r\n'.encode('utf-8'))
                 response_body.append(b'Content-Disposition: form-data; name="analysis"\r\n')
                 response_body.append(b'Content-Type: application/json\r\n\r\n')
-                response_body.append(json.dumps(analysis_data, ensure_ascii=False).encode('utf-8'))
+                response_body.append(json.dumps(analysis_data, indent=2, ensure_ascii=False).encode('utf-8'))
                 response_body.append(b'\r\n')
                 
                 # Part 2: processed_image (Binary)
@@ -178,9 +181,6 @@ class RemoveBgView(View):
 
 
 
-# ==========================================
-# [功能 2] 虚拟试穿 (独立功能，不继承去背状态)
-# ==========================================
 # ==========================================
 # [功能 2] 虚拟试穿 (独立功能，不继承去背状态)
 # ==========================================
@@ -368,7 +368,7 @@ class TryCombineView(View):
             response_body.append(f'--{boundary}\r\n'.encode('utf-8'))
             response_body.append(b'Content-Disposition: form-data; name="analysis"\r\n')
             response_body.append(b'Content-Type: application/json\r\n\r\n')
-            response_body.append(json.dumps(analysis_data, ensure_ascii=False).encode('utf-8'))
+            response_body.append(json.dumps(analysis_data, indent=2, ensure_ascii=False).encode('utf-8'))
             response_body.append(b'\r\n')
             
             # Part 2: try_on_result (Binary)
