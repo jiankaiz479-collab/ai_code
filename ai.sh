@@ -43,7 +43,7 @@ echo "鏡像構建成功，正在啟動容器（支持熱重載）..."
 docker stop ai_code_container 2>/dev/null
 docker rm ai_code_container 2>/dev/null
 
-# 啟動新容器，映射端口 RUN_PORT:8001，掛載主機目錄支持熱重載，並設置環境變數，覆蓋默認命令讓應用監聽 8001
+# 啟動新容器，映射主機 port 8002 到容器 port 8002
 docker run -d \
     --name ai_code_container \
     -p $RUN_PORT:8002 \
