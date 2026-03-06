@@ -40,6 +40,41 @@ class AIProcessor(ImageProcessingInterface):
         return filename, save_path
 
     # ==========================================
+    # [通用輔助] 構建錯誤響應
+    # ==========================================
+    def _build_error_response(self, code, message, tools_status, debug_info):
+        """統一構建錯誤響應，減少重複代碼"""
+        return {
+            'success': False,
+            'code': code,
+            'message': message,
+            'tools_status': tools_status,
+            'debug_info': debug_info
+        }
+
+    # ==========================================
+    # [通用輔助] 構建成功響應
+    # ==========================================
+    def _build_success_response(self, tools_status, **kwargs):
+        """
+        統一構建成功響應，支援動態欄位
+        kwargs 可包含: message, file_name, style_analysis, model_image_filename, tryon_result_filename, error_details 等
+        """
+        result = {
+            'success': True,
+            'code': 200,
+            'message': kwargs.get('message', 'Success'),
+            'tools_status': tools_status,
+        }
+        
+        # 動態添加其他欄位
+        for key in ['file_name', 'style_analysis', 'model_image_filename', 'tryon_result_filename', 'error_details']:
+            if key in kwargs:
+                result[key] = kwargs[key]
+        
+        return result
+
+    # ==========================================
     # [工具] 提取最大面积的前 N 个颜色（保留方法，但不使用）
     # ==========================================
     def _extract_top_colors(self, image_path, top_n=3):
@@ -125,7 +160,7 @@ class AIProcessor(ImageProcessingInterface):
     # ==========================================
     def _opencv_smooth_fabric(self, pil_img):
         try:
-            USE_SEMANTIC_LOGIC = False 
+            USE_SEMANTIC_LOGIC = False
             
             open_cv_image = np.array(pil_img.convert('RGB'))
             img = cv2.cvtColor(open_cv_image, cv2.COLOR_RGB2BGR)
@@ -242,31 +277,33 @@ class AIProcessor(ImageProcessingInterface):
         返回: (style_analysis: dict, success: bool, error: str)
         ⚠️ TODO: 切換工具時只需修改此方法
         """
-        # # ========== 測試硬編碼版本（暫時） ==========
-        # # 🔧 如果要测试失败情况，改 TEST_SUCCESS = False
-        # TEST_SUCCESS = True
+          # ========== 🔧 測試開關：模擬 Gemini API 失敗 ==========
+        TEST_GEMINI_FAILURE = False  # 改成 True 來測試失敗情況
         
-        # if TEST_SUCCESS:
-        #     style_analysis = {
-        #         "clothes_category": "T-shirt",
-        #         "style_name": "Casual",
-        #         "color_name": "Red"
-        #     }
-        #     return style_analysis, True, None
-        # else:
-        #     # 模拟失败情况
-        #     style_analysis = {
-        #         "clothes_category": "failed",
-        #         "style_name": "failed",
-        #         "color_name": "failed"
-        #     }
-        #     return style_analysis, False, "Test failure mode"
+        if TEST_GEMINI_FAILURE:
+            logger.warning("⚠️ [TEST MODE] 模擬 Gemini API 失敗")
+            failed_result = {
+                "clothes_category": "failed",
+                "style_name": "failed",
+                "color_name": "failed"
+            }
+            return failed_result, False, "Test: Simulated Gemini API failure"
+    # ========================================================
+    
+        # 失敗時的預設返回值
+        failed_result = {
+            "clothes_category": "failed",
+            "style_name": "failed",
+            "color_name": "failed"
+        }
         
-        # ========== 實際 Gemini API 版本（待啟用） ==========
-        if self.client:
-            try:
-                pil_img = Image.open(image_path)
-                prompt = """
+        if not self.client:
+            logger.warning("Gemini Client 未初始化")
+            return failed_result, False, "Client not initialized"
+        
+        try:
+            pil_img = Image.open(image_path)
+            prompt = """
                 Analyze the clothing item in this image. Provide the analysis in English and return ONLY a JSON object.
 
                 【STRICT CATEGORY RULE】:
@@ -295,47 +332,30 @@ class AIProcessor(ImageProcessingInterface):
 
                 Note: Answer based on the actual visual features. Do not force multiple tags if the item is plain.
         """
-                
-                response = self.client.models.generate_content(
-                    model=self.consultant_model,
-                    contents=[pil_img, prompt],
-                    config=types.GenerateContentConfig(
-                        response_mime_type="application/json",
-                        temperature=0.1  # 設定為 0.1 可以讓結果變得非常固定
-                    )
-                )
-                
-                result = json.loads(response.text)
-                style_analysis = {
-                    "clothes_category": result.get("clothes_category", "other"),
-                    "style_name": result.get("style_name", "Unknown"),
-                    "color_name": result.get("color_name", "Unknown")
-                }
-                
-                logger.info(f"✅ Gemini 风格分析成功: {style_analysis}")
-                return style_analysis, True, None
-                
-            except Exception as e:
-                error_msg = f"Gemini API 調用失敗: {str(e)}" if str(e) else "Gemini API 未初始化"
-                logger.warning(f"Gemini 風格分析失敗: {error_msg}")
-                
-                # ✅ 失败时返回 "failed"
-                style_analysis = {
-                    "clothes_category": "failed",
-                    "style_name": "failed",
-                    "color_name": "failed"
-                }
-                return style_analysis, False, error_msg
-        else:
-            logger.warning("Gemini Client 未初始化")
             
-            # ✅ 失败时返回 "failed"
+            response = self.client.models.generate_content(
+                model=self.consultant_model,
+                contents=[pil_img, prompt],
+                config=types.GenerateContentConfig(
+                    response_mime_type="application/json",
+                    temperature=0.1
+                )
+            )
+            
+            result = json.loads(response.text)
             style_analysis = {
-                "clothes_category": "failed",
-                "style_name": "failed",
-                "color_name": "failed"
+                "clothes_category": result.get("clothes_category", "other"),
+                "style_name": result.get("style_name", "Unknown"),
+                "color_name": result.get("color_name", "Unknown")
             }
-            return style_analysis, False, "Client not initialized"
+            
+            logger.info(f"✅ Gemini 风格分析成功: {style_analysis}")
+            return style_analysis, True, None
+            
+        except Exception as e:
+            error_msg = f"Gemini API 調用失敗: {str(e)}" if str(e) else "Gemini API 未初始化"
+            logger.warning(f"Gemini 風格分析失敗: {error_msg}")
+            return failed_result, False, error_msg
 
     # ==========================================
     # [功能 1] 去背並分析風格
@@ -371,17 +391,11 @@ class AIProcessor(ImageProcessingInterface):
             if not success:
                 tools_status["rembg_engine"] = "fail"
                 logger.error(f"❌ Rembg 去背失敗: {error}")
-                return {
-                    'success': False,
-                    'code': 422,
-                    'message': "Unprocessable Entity: 去背處理失敗",
-                    'tools_status': tools_status,
-                    'debug_info': {
-                        'error_type': 'RembgError',
-                        'error': error,
-                        'suggest': 'Please ensure the image has a clear subject.'
-                    }
-                }
+                return self._build_error_response(422, "Unprocessable Entity: 去背處理失敗", tools_status, {
+                    'error_type': 'RembgError',
+                    'error': error,
+                    'suggest': 'Please ensure the image has a clear subject.'
+                })
             tools_status["rembg_engine"] = "success"
             logger.info("✅ [Step 1/4] Rembg 去背成功")
             
@@ -390,18 +404,12 @@ class AIProcessor(ImageProcessingInterface):
             is_clear, score, _ = self.check_image_blur(output_img, threshold=50.0)
             if not is_clear:
                 logger.warning(f"⚠️ 圖片清晰度不足: {score:.2f}")
-                return {
-                    'success': False,
-                    'code': 422,
-                    'message': f"Unprocessable Entity: 圖片過於模糊",
-                    'tools_status': tools_status,
-                    'debug_info': {
-                        'error_type': 'ImageBlurryError',
-                        'score': round(score, 1),
-                        'threshold': 50.0,
-                        'suggest': "Please retake the photo in a brighter environment or stabilize your camera."
-                    }
-                }
+                return self._build_error_response(422, "Unprocessable Entity: 圖片過於模糊", tools_status, {
+                    'error_type': 'ImageBlurryError',
+                    'score': round(score, 1),
+                    'threshold': 50.0,
+                    'suggest': "Please retake the photo in a brighter environment or stabilize your camera."
+                })
             logger.info(f"✅ [Step 2/4] 清晰度檢測通過 (score: {score:.2f})")
             
             # ========== Step 3: 調用 OpenCV 磨皮工具 ==========
@@ -412,16 +420,10 @@ class AIProcessor(ImageProcessingInterface):
             if not success:
                 tools_status["opencv_masking"] = "fail"
                 logger.error(f"❌ OpenCV 磨皮失敗: {error}")
-                return {
-                    'success': False,
-                    'code': 422,
-                    'message': "Unprocessable Entity: 圖片處理失敗",
-                    'tools_status': tools_status,
-                    'debug_info': {
-                        'error_type': 'OpenCVProcessingError',
-                        'error': error
-                    }
-                }
+                return self._build_error_response(422, "Unprocessable Entity: 圖片處理失敗", tools_status, {
+                    'error_type': 'OpenCVProcessingError',
+                    'error': error
+                })
             tools_status["opencv_masking"] = "success"
             logger.info("✅ [Step 3/4] OpenCV 磨皮成功")
 
@@ -448,40 +450,31 @@ class AIProcessor(ImageProcessingInterface):
             # ========== 成功回傳（动态构建） ==========
             logger.info(f"🎉 去背完整流程成功！")
 
-            # 基础返回结构（严格按照 API 文档）
-            result = {
-                'success': True,
-                'code': 200,
-                'message': "Processing Success",
-                'tools_status': tools_status,
+            # 準備成功響應的參數
+            success_params = {
+                'message': 'Processing Success',
                 'file_name': filename,
                 'style_analysis': style_analysis
             }
 
-            # ✅ 只有当有工具失败时才动态添加 error_details
+            # 只有當 Gemini 失敗時才添加 error_details
             if tools_status["gemini_consultant"] == "fail":
-                result['error_details'] = {
+                success_params['error_details'] = {
                     "failed_tool": "gemini_consultant",
                     "error_type": "GeminiAPIError",
                     "error_message": error if error else "Unknown error"
                 }
 
-            return result
+            return self._build_success_response(tools_status, **success_params)
 
         except Exception as e:
             logger.error(f"❌ 去背發生未知錯誤: {str(e)}")
             import traceback
             logger.error(traceback.format_exc())
-            return {
-                'success': False,
-                'code': 500,
-                'message': "Internal Server Error: 系統運算失敗",
-                'tools_status': tools_status,
-                'debug_info': {
-                    'error_type': type(e).__name__,
-                    'error': str(e)
-                }
-            }
+            return self._build_error_response(500, "Internal Server Error: 系統運算失敗", tools_status, {
+                'error_type': type(e).__name__,
+                'error': str(e)
+            })
 
     # ==========================================
     # [功能 2] 虚拟试穿 (独立功能，不继承去背状态)
@@ -509,7 +502,6 @@ class AIProcessor(ImageProcessingInterface):
             'debug_info': {...}  # 仅失败时
         }
         """
-        # 虚拟试穿的工具状态（独立追踪）
         tools_status = {
             "rembg": "not_started",
             "opencv_smoothing": "not_started",
@@ -517,11 +509,8 @@ class AIProcessor(ImageProcessingInterface):
             "gemini_model": "not_started"
         }
         
-        # 设置默认值
-        if model_info is None:
-            model_info = {}
-        if garment_info is None:
-            garment_info = {}
+        model_info = model_info or {}
+        garment_info = garment_info or {}
         
         try:
             # ========== Step 1: 内部衣服预处理 ==========
@@ -534,16 +523,10 @@ class AIProcessor(ImageProcessingInterface):
             except Exception as e:
                 logger.error(f"❌ 衣服预处理失败: {e}")
                 tools_status["rembg"] = "fail"
-                return {
-                    'success': False,
-                    'code': 422,
-                    'message': "Unprocessable Entity: 衣服预处理失败",
-                    'tools_status': tools_status,
-                    'debug_info': {
-                        'error_type': 'GarmentPreprocessingError',
-                        'error': str(e)
-                    }
-                }
+                return self._build_error_response(422, "Unprocessable Entity: 衣服预处理失败", tools_status, {
+                    'error_type': 'GarmentPreprocessingError',
+                    'error': str(e)
+                })
             
             # ========== Step 2: 载入并检测人体 ==========
             logger.info("🔄 [TryOn Step 2/5] 载入模特图片并检测人体...")
@@ -551,40 +534,27 @@ class AIProcessor(ImageProcessingInterface):
                 pil_model = Image.open(model_image)
                 pil_cloth = Image.open(clean_clothes_path)
                 
-                # 简单的人体检测（测试版本）
                 width, height = pil_model.size
                 if width < 200 or height < 200:
                     logger.warning(f"⚠️ 模特图片尺寸过小: {width}x{height}")
                     tools_status["opencv_smoothing"] = "fail"
                     tools_status["gemini_model"] = "not_started"
-                    return {
-                        'success': False,
-                        'code': 422,
-                        'message': "No human body detected in model_image",
-                        'tools_status': tools_status,
-                        'debug_info': {
-                            'error_type': 'HumanDetectionError',
-                            'suggest': 'Please use a clearer photo with a visible person.',
-                            'image_size': f'{width}x{height}'
-                        }
-                    }
+                    return self._build_error_response(422, "No human body detected in model_image", tools_status, {
+                        'error_type': 'HumanDetectionError',
+                        'suggest': 'Please use a clearer photo with a visible person.',
+                        'image_size': f'{width}x{height}'
+                    })
                 
                 logger.info(f"✅ [TryOn Step 2/5] 人体检测通过 (size: {width}x{height})")
                 
             except Exception as e:
                 logger.error(f"❌ 人体检测失败: {e}")
                 tools_status["gemini_model"] = "not_started"
-                return {
-                    'success': False,
-                    'code': 422,
-                    'message': "No human body detected in model_image",
-                    'tools_status': tools_status,
-                    'debug_info': {
-                        'error_type': 'HumanDetectionError',
-                        'error': str(e),
-                        'suggest': 'Please use a clearer photo with a visible person.'
-                    }
-                }
+                return self._build_error_response(422, "No human body detected in model_image", tools_status, {
+                    'error_type': 'HumanDetectionError',
+                    'error': str(e),
+                    'suggest': 'Please use a clearer photo with a visible person.'
+                })
             
             # ========== Step 3: 尺寸匹配检查（可选）==========
             logger.info("🔄 [TryOn Step 3/5] 检查尺寸匹配...")
@@ -593,8 +563,6 @@ class AIProcessor(ImageProcessingInterface):
             )
             if not size_check_result['compatible']:
                 logger.warning(f"⚠️ 尺寸不匹配: {size_check_result['reason']}")
-                # 注意：这里可以选择返回警告或继续处理
-                # 暂时只记录日志，继续处理
             logger.info(f"✅ [TryOn Step 3/5] 尺寸检查完成")
             
             # ========== Step 4: 保存模特图片 ==========
@@ -606,7 +574,6 @@ class AIProcessor(ImageProcessingInterface):
             # ========== Step 5: AI 虚拟试穿合成 ==========
             logger.info("🔄 [TryOn Step 5/5] 启动 AI 虚拟试穿引擎...")
             
-            # ========== 测试版本（暂时） ==========
             tryon_filename, tryon_save_path = self.get_unique_filename(prefix="try_result", ext="png")
             pil_cloth.save(tryon_save_path, "PNG")
             
@@ -618,30 +585,20 @@ class AIProcessor(ImageProcessingInterface):
             logger.info(f"   - 模特身高: {model_info.get('user_height', 'N/A')} cm")
             logger.info(f"   - 衣服长度: {garment_info.get('clothe_length', 'N/A')} cm")
             
-            return {
-                'success': True,
-                'code': 200,
-                'message': "Success",
-                'tools_status': tools_status,
-                'model_image_filename': model_filename,
-                'tryon_result_filename': tryon_filename
-            }
+            return self._build_success_response(tools_status,
+                model_image_filename=model_filename,
+                tryon_result_filename=tryon_filename
+            )
         
         except Exception as e:
             logger.error(f"❌ 虚拟试穿发生未知错误: {str(e)}")
             import traceback
             logger.error(traceback.format_exc())
             tools_status["gemini_model"] = "error"
-            return {
-                'success': False,
-                'code': 500,
-                'message': "Internal Server Error: 系统运算失败",
-                'tools_status': tools_status,
-                'debug_info': {
-                    'error_type': type(e).__name__,
-                    'error': str(e)
-                }
-            }
+            return self._build_error_response(500, "Internal Server Error: 系统运算失败", tools_status, {
+                'error_type': type(e).__name__,
+                'error': str(e)
+            })
 
     def _check_size_compatibility(self, clothes_category, model_info, garment_info):
         """
@@ -650,12 +607,10 @@ class AIProcessor(ImageProcessingInterface):
         """
         try:
             if clothes_category == 'cloth':
-                # 检查上衣尺寸
                 user_height = model_info.get('user_height', 0)
                 clothe_length = garment_info.get('clothe_length', 0)
                 
                 if user_height > 0 and clothe_length > 0:
-                    # 简单的比例检查
                     if clothe_length < user_height * 0.3 or clothe_length > user_height * 0.5:
                         return {
                             'compatible': False,
@@ -663,7 +618,6 @@ class AIProcessor(ImageProcessingInterface):
                         }
             
             elif clothes_category == 'pants':
-                # 检查裤子尺寸
                 user_height = model_info.get('user_height', 0)
                 pants_length = garment_info.get('pants_length', 0)
                 
