@@ -189,7 +189,7 @@ class TryCombineView(View):
     def post(self, request, *args, **kwargs):
         # ========== 接收文件 ==========
         model_image = request.FILES.get('model_image')
-        garment_image = request.FILES.get('garment_image') or request.FILES.get('clothes_image')
+        garment_image = request.FILES.get('clothes_image')
 
         # ========== 接收 JSON 数据 ==========
         try:
@@ -214,7 +214,9 @@ class TryCombineView(View):
                     "rembg": "not_started",
                     "opencv_smoothing": "not_started",
                     "gemini_consultant": "not_started",
-                    "gemini_model": "not_started"
+                    "gemini_model": "not_started",
+                    "densepose": "not_started",          
+                    "controlnet": "not_started"
                 },
                 "debug_info": {
                     "error_type": "MissingFileError",
@@ -232,7 +234,9 @@ class TryCombineView(View):
                     "rembg": "not_started",
                     "opencv_smoothing": "not_started",
                     "gemini_consultant": "not_started",
-                    "gemini_model": "not_started"
+                    "gemini_model": "not_started",
+                    "densepose": "not_started",          
+                    "controlnet": "not_started"
                 },
                 "debug_info": {
                     "error_type": "InvalidFormatError",

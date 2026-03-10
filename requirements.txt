@@ -1,6 +1,18 @@
-Django
-google-genai
-rembg[cpu]
-pillow
-requests
-python-dotenv
+# --- 核心 Web 框架 ---
+Django>=5.0,<7.0
+
+# --- AI 與影像處理 ---
+google-genai>=1.0
+rembg[cpu]>=2.0
+pillow>=10.0
+opencv-python-headless>=4.8
+numpy>=1.26,<3.0
+scipy>=1.11
+
+# --- DensePose / Detectron2 相關必要依賴 ---
+av>=12.0
+pycocotools>=2.0
+
+# --- 環境與網路工具 ---
+python-dotenv>=1.0
+requests>=2.31
