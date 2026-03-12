@@ -4,17 +4,17 @@ set -euo pipefail
 ################################################################################
 # ai_code Django 應用啟動腳本（Docker）
 # - 載入 .env
-# - 檢查必要變數與 DensePose 設定
+# - 檢查必要變數
+# - 檢查本機 DensePose 權重是否存在
 # - 檢查 Docker 狀態
 # - build image / 重建 container / 啟動服務
 ################################################################################
 
-# 可由外部環境覆蓋
 APP_IMAGE="${APP_IMAGE:-ai_code_app}"
 CONTAINER_NAME="${CONTAINER_NAME:-ai_code_container}"
 APP_PORT_IN_CONTAINER="8002"
+LOCAL_DENSEPOSE_WEIGHTS="$(pwd)/densepose_assets/model_final_162be9.pkl"
 
-# 失敗時提示
 on_error() {
   local code=$?
   echo ""
@@ -54,31 +54,22 @@ fi
 
 echo "✅ RUN_PORT / GOOGLE_API_KEY 檢查通過"
 
-# 3) DensePose 必要設定檢查
-if [ "${ENABLE_DENSEPOSE:-}" != "true" ]; then
-  echo "❌ 錯誤：ENABLE_DENSEPOSE 必須為 true"
-  exit 1
-fi
-
-if [ -z "${DENSEPOSE_CFG:-}" ] || [ -z "${DENSEPOSE_WEIGHTS:-}" ]; then
-  echo "❌ 錯誤：必須設定 DENSEPOSE_CFG 與 DENSEPOSE_WEIGHTS"
-  exit 1
-fi
-
-# DENSEPOSE_CFG 若是本地路徑（非 URL），必須存在
-if [[ "${DENSEPOSE_CFG}" != http://* ]] && [[ "${DENSEPOSE_CFG}" != https://* ]]; then
-  if [ ! -f "${DENSEPOSE_CFG}" ]; then
-    echo "❌ 錯誤：DENSEPOSE_CFG 本地檔案不存在：${DENSEPOSE_CFG}"
-    echo "💡 若是相對路徑，請確認你在專案根目錄執行此腳本"
+# 3) DensePose 設定檢查
+if [ "${ENABLE_DENSEPOSE:-false}" = "true" ]; then
+  if [ ! -f "${LOCAL_DENSEPOSE_WEIGHTS}" ]; then
+    echo "❌ 錯誤：找不到 DensePose 權重檔"
+    echo "   預期位置：${LOCAL_DENSEPOSE_WEIGHTS}"
     exit 1
   fi
-  echo "✅ DensePose cfg 檔案存在：${DENSEPOSE_CFG}"
-else
-  echo "⚠️ DENSEPOSE_CFG 是 URL：${DENSEPOSE_CFG}"
-  echo "💡 若你的程式禁止 cfg 使用 URL，請改成本地相對路徑"
-fi
 
-echo "✅ DensePose 設定檢查通過"
+  if [ "$(stat -c%s "${LOCAL_DENSEPOSE_WEIGHTS}")" -lt 10000000 ]; then
+    echo "❌ 錯誤：DensePose 權重檔太小，可能不是有效模型"
+    echo "   檔案：${LOCAL_DENSEPOSE_WEIGHTS}"
+    exit 1
+  fi
+
+  echo "✅ DensePose 權重檢查通過"
+fi
 
 # 4) Docker 檢查
 if ! command -v docker >/dev/null 2>&1; then
@@ -102,15 +93,15 @@ echo "🛑 停止舊容器（若存在）"
 docker stop "${CONTAINER_NAME}" >/dev/null 2>&1 || true
 docker rm "${CONTAINER_NAME}" >/dev/null 2>&1 || true
 
-# 7) 啟動新容器（掛載專案目錄，支援熱更新）
+# 7) 啟動新容器
 echo "🚀 啟動新容器：${CONTAINER_NAME}"
 docker run -d \
   --name "${CONTAINER_NAME}" \
   -p "${RUN_PORT}:${APP_PORT_IN_CONTAINER}" \
-  -v "$(pwd):/app" \
   --env-file .env \
-  "${APP_IMAGE}" \
-  python manage.py runserver 0.0.0.0:${APP_PORT_IN_CONTAINER}
+  -v "$(pwd)/ai_app:/app/ai_app" \
+  -v "$(pwd)/densepose_assets:/app/densepose_assets" \
+  "${APP_IMAGE}"
 
 # 8) 完成提示
 echo "-------------------------------------------------------"
