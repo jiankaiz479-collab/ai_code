@@ -54,55 +54,31 @@ fi
 
 echo "✅ RUN_PORT / GOOGLE_API_KEY 檢查通過"
 
-# 3) DensePose 設定檢查（改為彈性）
-if [ "${ENABLE_DENSEPOSE:-false}" = "true" ]; then
-  echo "ℹ️ ENABLE_DENSEPOSE=true，開始檢查 DensePose 設定"
-
-  # DENSEPOSE_CFG 可留空：自動偵測
-  if [ -z "${DENSEPOSE_CFG:-}" ]; then
-    echo "⚠️ DENSEPOSE_CFG 未設定，嘗試自動偵測..."
-    AUTO_CFG="$(python -c "import os,detectron2; p=os.path.dirname(detectron2.__file__); c=os.path.join(os.path.dirname(p),'projects','DensePose','configs','densepose_rcnn_R_50_FPN_s1x.yaml'); print(c if os.path.isfile(c) else '')" 2>/dev/null || true)"
-    if [ -n "${AUTO_CFG}" ]; then
-      DENSEPOSE_CFG="${AUTO_CFG}"
-      export DENSEPOSE_CFG
-      echo "✅ 自動偵測到 DENSEPOSE_CFG：${DENSEPOSE_CFG}"
-    else
-      echo "❌ 錯誤：找不到 DensePose cfg，請在 .env 設定 DENSEPOSE_CFG"
-      exit 1
-    fi
-  fi
-
-  # DENSEPOSE_CFG 若是本地路徑（非 URL），必須存在
-  if [[ "${DENSEPOSE_CFG}" != http://* ]] && [[ "${DENSEPOSE_CFG}" != https://* ]]; then
-    if [ ! -f "${DENSEPOSE_CFG}" ]; then
-      echo "❌ 錯誤：DENSEPOSE_CFG 本地檔案不存在：${DENSEPOSE_CFG}"
-      echo "💡 若是相對路徑，請確認你在專案根目錄執行此腳本"
-      exit 1
-    fi
-    echo "✅ DensePose cfg 檔案存在：${DENSEPOSE_CFG}"
-  else
-    echo "⚠️ DENSEPOSE_CFG 是 URL：${DENSEPOSE_CFG}"
-  fi
-
-  # DENSEPOSE_WEIGHTS 改為可選：有填才檢查
-  if [ -n "${DENSEPOSE_WEIGHTS:-}" ]; then
-    if [[ "${DENSEPOSE_WEIGHTS}" != http://* ]] && [[ "${DENSEPOSE_WEIGHTS}" != https://* ]]; then
-      if [ ! -f "${DENSEPOSE_WEIGHTS}" ]; then
-        echo "❌ 錯誤：DENSEPOSE_WEIGHTS 本地檔案不存在：${DENSEPOSE_WEIGHTS}"
-        exit 1
-      fi
-      echo "✅ DensePose weights 檔案存在：${DENSEPOSE_WEIGHTS}"
-    else
-      echo "⚠️ DENSEPOSE_WEIGHTS 是 URL：${DENSEPOSE_WEIGHTS}"
-    fi
-  else
-    echo "ℹ️ 未設定 DENSEPOSE_WEIGHTS，將使用程式預設/自動下載邏輯"
-  fi
-
-  echo "✅ DensePose 設定檢查通過"
-else
-  echo "ℹ️ ENABLE_DENSEPOSE!=true，略過 DensePose 檢查"
+# 3) DensePose 必要設定檢查
+if [ "${ENABLE_DENSEPOSE:-}" != "true" ]; then
+  echo "❌ 錯誤：ENABLE_DENSEPOSE 必須為 true"
+  exit 1
 fi
+
+if [ -z "${DENSEPOSE_CFG:-}" ] || [ -z "${DENSEPOSE_WEIGHTS:-}" ]; then
+  echo "❌ 錯誤：必須設定 DENSEPOSE_CFG 與 DENSEPOSE_WEIGHTS"
+  exit 1
+fi
+
+# DENSEPOSE_CFG 若是本地路徑（非 URL），必須存在
+if [[ "${DENSEPOSE_CFG}" != http://* ]] && [[ "${DENSEPOSE_CFG}" != https://* ]]; then
+  if [ ! -f "${DENSEPOSE_CFG}" ]; then
+    echo "❌ 錯誤：DENSEPOSE_CFG 本地檔案不存在：${DENSEPOSE_CFG}"
+    echo "💡 若是相對路徑，請確認你在專案根目錄執行此腳本"
+    exit 1
+  fi
+  echo "✅ DensePose cfg 檔案存在：${DENSEPOSE_CFG}"
+else
+  echo "⚠️ DENSEPOSE_CFG 是 URL：${DENSEPOSE_CFG}"
+  echo "💡 若你的程式禁止 cfg 使用 URL，請改成本地相對路徑"
+fi
+
+echo "✅ DensePose 設定檢查通過"
 
 # 4) Docker 檢查
 if ! command -v docker >/dev/null 2>&1; then
@@ -133,7 +109,6 @@ docker run -d \
   -p "${RUN_PORT}:${APP_PORT_IN_CONTAINER}" \
   -v "$(pwd):/app" \
   --env-file .env \
-  -e DENSEPOSE_CFG="${DENSEPOSE_CFG:-}" \
   "${APP_IMAGE}" \
   python manage.py runserver 0.0.0.0:${APP_PORT_IN_CONTAINER}
 
