@@ -37,26 +37,28 @@ if [ $? -ne 0 ]; then
     exit 1
 fi
 
-echo "鏡像構建成功，正在啟動容器（支持熱重載）..."
+echo "鏡像構建成功，正在啟動容器（支持熱重載，且模型完全隔離）..."
 
 # 停止並刪除可能存在的舊容器
 docker stop ai_code_container 2>/dev/null
 docker rm ai_code_container 2>/dev/null
 
-# 啟動新容器，映射主機 port 8002 到容器 port 8002
+# 啟動新容器
 docker run -d \
     --name ai_code_container \
     -p $RUN_PORT:8002 \
     -v $(pwd):/app \
+    -v u2net_cache:/app/.u2net \
+    --env U2NET_HOME=/app/.u2net \
     --env-file .env \
     ai_code_app \
     python manage.py runserver 0.0.0.0:8002
 
 if [ $? -eq 0 ]; then
     echo "容器啟動成功！應用現在運行在 http://localhost:$RUN_PORT"
-    echo "熱重載已啟用：修改代碼後，服務器會自動重啟。"
-    echo "要停止容器，請運行：docker stop ai_core_container"
-    echo "要查看日誌，請運行：docker logs ai_core_container"
+    echo "隔離成功：模型現在鎖在容器內 /app/.u2net，主機不會再看到該資料夾。"
+    echo "要停止容器，請運行：docker stop ai_code_container"
+    echo "要查看日誌，請運行：docker logs ai_code_container"
 else
     echo "錯誤：容器啟動失敗。"
     exit 1
