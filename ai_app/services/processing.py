@@ -1,29 +1,16 @@
 import os
-import os
-import sys
-import detectron2
 import uuid
 import logging
 import json
 import numpy as np
 import cv2  
-import torch
-import urllib.request
 from django.conf import settings
 from .interfaces import ImageProcessingInterface
 from rembg import remove, new_session
 from PIL import Image, ImageEnhance
 from google import genai
 from google.genai import types
-from detectron2.config import get_cfg
-from detectron2.engine import DefaultPredictor
-from densepose import add_densepose_config
-from densepose.vis.base import CompoundVisualizer
-from densepose.vis.densepose_results import DensePoseResultsFineSegmentationVisualizer
-from densepose.vis.extractor import CompoundExtractor, DensePoseResultExtractor
-from densepose.vis.base import CompoundVisualizer
-from densepose.vis.bounding_box import ScoredBoundingBoxVisualizer # 引入 Box 視覺化
-from densepose.vis.densepose_results import DensePoseResultsFineSegmentationVisualizer
+
 
 logger = logging.getLogger(__name__)
 
@@ -340,258 +327,213 @@ JSON Structure:
         except Exception as e:
             logger.error(f"❌ 去背發生未知錯誤: {str(e)}")
             return self._build_error_response(500, "Internal Server Error: 系統運算失敗", tools_status, {'error': str(e)})
-
-    # ==========================================
-    # [功能 2] 虚拟试穿
-    # ==========================================
-    def virtual_try_on(self, model_image, clean_clothes_path, clothes_category='cloth', model_info=None, garment_info=None):
-        tools_status = {
-            "rembg": "not_started",
-            "opencv_smoothing": "not_started",
-            "gemini_consultant": "not_started",
-            "gemini_model": "not_started",
-            "densepose": "not_started"
-        }
-        
-        model_info = model_info or {}
-        garment_info = garment_info or {}
-        
+#---------------------------------------------------------------------------------------------------------------------------
+    def _get_dominant_color(self, pil_img):
+        """
+        計算圖片主色調，但強制忽略透明背景 (Alpha = 0)
+        """
         try:
-            # Step 1: 預設工具成功 (這裡不重複執行預處理，直接標記)
-            tools_status["rembg"] = "success"
-            tools_status["opencv_smoothing"] = "success"
-            tools_status["gemini_consultant"] = "success"
-            
-            # Step 2: 载入并检测人体图片
-            logger.info("🔄 [TryOn] 载入模特图片...")
-            try:
-                pil_model = Image.open(model_image)
-                width, height = pil_model.size
-                if width < 200 or height < 200:
-                    tools_status["densepose"] = "fail"
-                    return self._build_error_response(422, "No human body detected in model_image", tools_status, {'image_size': f'{width}x{height}'})
-            except Exception as e:
-                tools_status["densepose"] = "fail"
-                return self._build_error_response(422, "Invalid model image", tools_status, {'error': str(e)})
-            
-            # 保存模特圖片以供後續使用
-            model_filename, model_save_path = self.get_unique_filename(prefix="model", ext="png")
-            pil_model.save(model_save_path, "PNG")
-            
-            # Step 3: 姿態提取 (嚴格限定 DensePose)
-            pose_map_path, ok, err = self.extract_pose_map(model_save_path)
-            if not ok:
-                tools_status["densepose"] = "fail"
-                logger.error(f"❌ 姿態提取失敗: {err}")
-                return self._build_error_response(422, "Pose extraction failed", tools_status, {"error": err})
-            tools_status["densepose"] = "success"  
-            
-            # Step 4: AI 虚拟试穿合成 
-            tryon_filename, tryon_save_path = self.get_unique_filename(prefix="try_result", ext="png")
-            
-            ok, err = self.generate_tryon_image(
-                model_image_path=model_save_path,
-                garment_image_path=clean_clothes_path,
-                pose_map_path=pose_map_path,
-                output_path=tryon_save_path,
-                model_info=model_info,
-                garment_info=garment_info
-            )
-            
-            if not ok:
-                tools_status["gemini_model"] = "fail"
-                logger.error(f"❌ 試穿生成失敗: {err}")
-                return self._build_error_response(422, "Try-on generation failed", tools_status, {"error": err})
+            # 1. 確保圖片是 RGBA 模式 (包含透明通道)
+            img = pil_img.convert("RGBA")
+            img.thumbnail((200, 200)) # 縮小加速
 
-            tools_status["gemini_model"] = "success"    
-            logger.info(f"🎉 虚拟试穿合成成功！")
-            
-            return self._build_success_response(tools_status, model_image_filename=model_filename, tryon_result_filename=tryon_filename)
-        
+            # 2. 取得所有像素的顏色與計數
+            # getcolors 回傳格式: [(count, (r, g, b, a)), ...]
+            colors = img.getcolors(maxcolors=200*200)
+
+            if not colors:
+                return "#000000"
+
+            # 3. 過濾掉「透明」或「太接近白色/黑色」的雜訊
+            valid_colors = []
+            for count, color in colors:
+                r, g, b, a = color
+                
+                # 忽略透明像素 (Alpha < 128)
+                if a < 128: 
+                    continue
+                
+                # 忽略極度接近純白的像素 (通常是反光或去背邊緣)
+                if r > 250 and g > 250 and b > 250:
+                    continue
+                    
+                # 忽略極度接近純黑的像素 (通常是陰影)
+                if r < 5 and g < 5 and b < 5:
+                    continue
+
+                valid_colors.append((count, (r, g, b)))
+
+            # 4. 如果過濾完沒東西了 (例如整張全白)，就回傳原本的
+            if not valid_colors:
+                return "original color"
+
+            # 5. 找出出現次數最多的顏色
+            valid_colors.sort(key=lambda x: x[0], reverse=True)
+            top_color = valid_colors[0][1] # (r, g, b)
+
+            # 6. 轉成 Hex Code
+            return '#{:02x}{:02x}{:02x}'.format(top_color[0], top_color[1], top_color[2])
+
         except Exception as e:
-            logger.error(f"❌ 虚拟试穿发生未知错误: {str(e)}")
-            tools_status["gemini_model"] = "error"
-            return self._build_error_response(500, "Internal Server Error: 系统运算失败", tools_status, {'error': str(e)})
+            logger.warning(f"⚠️ 取色失敗: {e}")
+            return "original color"
+        
 
 
-    def extract_pose_map(self, model_image_path):
+
+    def _create_texture_swatch(self, pil_img):
         """
-        [輔助工具] 姿態提取工具 - 專為 detectron2 v0.6 與 Gemini 視覺約束優化
-        包含動態解包防呆機制與純淨 IUV 渲染。
+        裁切圖片中心 50% 的區域，當作材質特寫餵給 AI
         """
+        width, height = pil_img.size
+        left = width * 0.25
+        top = height * 0.25
+        right = width * 0.75
+        bottom = height * 0.75
+        return pil_img.crop((left, top, right, bottom))
+
+    def analyze_garment(self, pil_cloth_img) -> str:
+        """
+        讓 AI 擔任驗布師，產生極度詳細的規格書
+        """
+        print(f"🧐 [AI 分析] 正在解析衣服細節...")
         try:
-            # 1. 自動尋找 detectron2 套件位置推算路徑
-            import detectron2
-            d2_pkg_path = os.path.dirname(detectron2.__file__)
-            calculated_densepose_path = os.path.join(os.path.dirname(d2_pkg_path), 'projects', 'DensePose')
-            
-            if not os.path.exists(calculated_densepose_path):
-                calculated_densepose_path = "/app/detectron2/projects/DensePose"
+            analysis_prompt = """
+            ### Role
+            You are a Senior Technical Fashion Analyst. Your job is to extract a precise "Digital Twin" specification from a clothing image.
 
-            _, pose_map_path = self.get_unique_filename(prefix="pose_map", ext="png")
+            ### Task
+            Analyze the provided garment image and generate a structured technical description. Focus on physical reality.
 
-            # 2. 初始化 DensePose Predictor
-            if not hasattr(self, '_densepose_predictor'):
-                from detectron2.config import get_cfg
-                from detectron2.engine import DefaultPredictor
-                from densepose import add_densepose_config
+            ### Output Format (Strictly follow this structure)
+            1. **Category**: (e.g., Hoodie, Maxi Dress, Denim Jacket)
+            2. **Material Physics**:
+               - Texture: (e.g., Ribbed, Satin-finish, Distressed denim)
+               - Weight: (e.g., Heavyweight, Sheer, Stiff)
+               - Drape: (e.g., Flows loosely, Structured/Rigid)
+            3. **Visual Details**:
+               - Color: (Specific shade description)
+               - Pattern: (Describe exact print, logo text, or graphics and their location)
+            4. **Construction**:
+               - Fit: (Oversized, Slim, Boxy)
+               - Neckline/Sleeves: (Crew neck, Drop shoulder, Raglan)
+               - Details: (Visible stitching, buttons, zippers, pockets)
 
-                cfg = get_cfg()
-                add_densepose_config(cfg)
-                
-                cfg_path = os.getenv("DENSEPOSE_CFG", "").strip()
-                if not cfg_path:
-                    cfg_path = os.path.join(calculated_densepose_path, "configs/densepose_rcnn_R_50_FPN_s1x.yaml")
-                
-                weights_path = os.getenv("DENSEPOSE_WEIGHTS", "").strip()
-                if weights_path and weights_path.startswith('http'):
-                    weights_local = "/tmp/densepose_weights.pkl"
-                    if not os.path.exists(weights_local):
-                        import urllib.request
-                        urllib.request.urlretrieve(weights_path, weights_local)
-                    weights_path = weights_local
-                
-                cfg.merge_from_file(cfg_path)
-                if weights_path:
-                    cfg.MODEL.WEIGHTS = weights_path
-                cfg.MODEL.DEVICE = os.getenv("DENSEPOSE_DEVICE", "cpu")
-                
-                # 💡 增加信心分數門檻，過濾雜訊，防止抓到錯誤的微小特徵
-                cfg.MODEL.ROI_HEADS.SCORE_THRESH_TEST = 0.5 
-                
-                self._densepose_predictor = DefaultPredictor(cfg)
-            
-
-            
-            img = cv2.imread(model_image_path)
-            if img is None:
-                return None, False, "無法讀取模特兒圖片"
-            
-            with torch.no_grad():
-                outputs = self._densepose_predictor(img)
-            
-            # 4. 檢查結果
-            if "instances" not in outputs:
-                return None, False, "DensePose 輸出格式異常"
-            instances = outputs["instances"].to("cpu")
-            if len(instances) == 0:
-                return None, False, "DensePose 未檢測到人體"
-            if not instances.has("pred_densepose"):
-                return None, False, "無法從影像中提取姿態特徵"
-
-            # ==========================================
-            # 5. 提取結果並繪圖 (終極解法：動態解包與純淨渲染)
-            # ==========================================
-            from densepose.vis.extractor import DensePoseResultExtractor
-            from densepose.vis.densepose_results import DensePoseResultsFineSegmentationVisualizer
-            
-            # A. 使用官方 Extractor 解析原始特徵 (將 GPU 裸訊號解碼)
-            extractor = DensePoseResultExtractor()
-            extracted_data = extractor(instances)
-            
-            # B. 動態解包 (Dynamic Unpacking) 🛡️ 防呆機制
-            # 解決 detectron2 不同版本 API 回傳變數數量不一致的致命痛點
-            if len(extracted_data) == 3:
-                boxes, scores, dp_results = extracted_data  # 某些版本回傳 3 個參數
-            elif len(extracted_data) == 2:
-                boxes, dp_results = extracted_data          # 某些版本回傳 2 個參數
-            else:
-                return None, False, f"未知的 DensePose 特徵格式: 預期 2 或 3 個變數，卻收到 {len(extracted_data)} 個"
-            
-            # C. 強制重新打包為嚴格的 2 元組格式 (Tuple)
-            formatted_data = (boxes, dp_results)
-            
-            # D. 啟動純淨渲染 (拔除 Bounding Box 外框，專供 Gemini 作為邊界約束圖)
-            visualizer = DensePoseResultsFineSegmentationVisualizer()
-            blank_bg = np.zeros(img.shape, dtype=np.uint8)
-            vis_img = visualizer.visualize(blank_bg, formatted_data)
-            # ==========================================
-
-            # 6. 儲存圖片
-            from PIL import Image
-            Image.fromarray(cv2.cvtColor(vis_img, cv2.COLOR_BGR2RGB)).save(pose_map_path, "PNG")
-            logger.info(f"✅ DensePose 成功產出純淨版 Pose Map: {pose_map_path}")
-            
-            return pose_map_path, True, None
-            
-        except Exception as e:
-            logger.error(f"❌ DensePose 報錯: {str(e)}")
-            import traceback
-            logger.error(traceback.format_exc())
-            return None, False, f"DensePose 執行失敗: {str(e)}"
-
-
-    def generate_tryon_image(self, model_image_path, garment_image_path, pose_map_path, output_path, model_info, garment_info):
-        """
-        試穿生成工具 - 唯一指定使用 Gemini API 
-        並將尺寸數據直接注入 Prompt。
-        """
-        try:
-            if not self.client:
-                logger.error("❌ Gemini client 未初始化，無法執行試穿合成")
-                return False, "Gemini client 未初始化"
-            
-            # 載入所有輔助圖片
-            model_img = Image.open(model_image_path)
-            garment_img = Image.open(garment_image_path)
-            pose_img = Image.open(pose_map_path)
-            
-            # 格式化尺寸數據以供 Prompt 使用
-            m_info_str = json.dumps(model_info, ensure_ascii=False) if model_info else "Not provided"
-            g_info_str = json.dumps(garment_info, ensure_ascii=False) if garment_info else "Not provided"
-            
-            # 將尺寸參數注入，讓模型判斷衣服長度
-            prompt = f"""
-            You are a professional virtual try-on AI. Generate a realistic photo of the person wearing the provided garment.
-
-            **Inputs:**
-            1. Model photo: Original person image
-            2. Garment photo: Clothing item (background removed)
-            3. Pose map: Body pose guidance (DensePose output)
-
-            **Size Information (Crucial for rendering correct garment length):**
-            - Model Body Measurements (cm): {m_info_str}
-            - Garment Measurements (cm): {g_info_str}
-            Please analyze these measurements to accurately determine how long or short the garment should appear on the model's body. 
-
-            **Requirements:**
-            - Preserve the person's face, body proportions, and pose EXACTLY
-            - Fit the garment naturally on the person's body reflecting the exact size constraints
-            - Maintain realistic lighting, shadows, and wrinkles
-            - Keep background unchanged
-            - Output high-quality photorealistic result
-
-            Generate the final try-on image now.
+            ### Constraint
+            Describe EXACTLY what you see. Do not hallucinate accessories not present in the image.
             """
             
-            logger.info(f"🔄 調用 Gemini ({self.model_name}) 進行多圖合成試穿...")
-            
-            # 保留你要求的呼叫格式
             response = self.client.models.generate_content(
-                model=self.model_name, 
-                contents=[
-                    prompt,
-                    model_img,
-                    garment_img, 
-                    pose_img
-                ]
+                model=self.analysis_model,
+                contents=[pil_cloth_img, analysis_prompt]
             )
             
-            # 提取生成的圖片並存檔
-            if hasattr(response, 'candidates') and response.candidates:
-                candidate = response.candidates[0]
-                if hasattr(candidate, 'content') and candidate.content.parts:
-                    for part in candidate.content.parts:
-                        if hasattr(part, 'inline_data'):
-                            image_data = part.inline_data.data
-                            with open(output_path, 'wb') as f:
-                                f.write(image_data)
-                            logger.info("✅ Gemini api試穿圖合成成功！")
-                            return True, None
-                            
-            return False, "API 回傳成功，但沒有解析到圖片資料"
-            
+            description = response.text if response.text else "Standard garment"
+            print(f"📝 分析結果: {description}")
+            return description
+
         except Exception as e:
-            # 捕捉詳細的 Gemini 錯誤，直接宣告失敗，不跑降級
-            logger.error(f"❌ Gemini 生成失敗: {repr(e)}")
-            return False, f"Gemini API 錯誤: {str(e)}"
+            print(f"⚠️ 分析失敗 (使用預設值): {e}")
+            return "A clothing item"
+
+    
+    
+    #  功能 2: 虛擬試穿 (Virtual Try-On) - 最終強大版
+    # ==========================================
+    def virtual_try_on(self, model_image, clean_clothes_path, model_info=None, garment_info=None):
+        """
+        虛擬試穿功能：融合取色、材質特寫與技術分析的高保真版本。
+        修復格式衝突，回傳標準 Dictionary 以供 View 使用。
+        """
+        tools_status = {
+            "rembg": "success", 
+            "opencv_smoothing": "success", 
+            "gemini_consultant": "running", 
+            "gemini_model": "not_started",
+            "densepose": "skipped"
+        }
+        
+        try:
+            if not self.client:
+                return self._build_error_response(500, "Gemini Client 未初始化", tools_status, {})
+
+            # 1. 讀取圖片素材
+            if hasattr(model_image, 'seek'): model_image.seek(0)
+            pil_model = Image.open(model_image)
+            pil_cloth = Image.open(clean_clothes_path)
+
+            # 2. [VFX 邏輯] 取得色碼與材質特寫圖
+            hex_color = self._get_dominant_color(pil_cloth)
+            texture_swatch = self._create_texture_swatch(pil_cloth)
+            
+            # 3. [技術分析] 讓分析模型提取衣服細節
+            garment_description = self.analyze_garment(pil_cloth)
+            tools_status["gemini_consultant"] = "success"
+
+            # 4. 保存模特圖檔名備份 (對應 View 的需求)
+            model_filename, model_save_path = self.get_unique_filename(prefix="model", ext="png")
+            pil_model.save(model_save_path, "PNG")
+
+            # 5. 構建合成 Prompt
+            m_info_str = json.dumps(model_info, ensure_ascii=False) if model_info else "Standard"
+            prompt = f"""
+            ### Role: Expert AI VFX Artist specializing in photorealistic virtual try-on.
+            ### Inputs: Image 1(Garment), Image 2(Model), Image 3(Texture Swatch)
+            
+            ### Specs:
+            - Target Color: {hex_color} (STRICT)
+            - Technical Analysis: {garment_description}
+            - Model Context: {m_info_str}
+
+            ### Instructions:
+            1. IDENTITY: KEEP face, expression, and body shape of Image 2 EXACTLY.
+            2. TEXTURE: Map texture from Image 3 onto the garment in Image 1.
+            3. REALISM: Photorealistic high-resolution output. No filters.
+            """
+
+            # 6. 調用 Gemini 進行合成
+            # 注意：這裡使用了 get_unique_filename 取得檔名與路徑
+            tryon_filename, tryon_save_path = self.get_unique_filename(prefix="tryon_final", ext="png")
+            
+            response = self.client.models.generate_content(
+                model=self.model_name,
+                contents=[pil_cloth, pil_model, texture_swatch, prompt]
+            )
+
+            # 7. 提取產出的圖片並儲存
+            image_saved = False
+            if response.candidates and response.candidates[0].content.parts:
+                for part in response.candidates[0].content.parts:
+                    if hasattr(part, 'inline_data'):
+                        with open(tryon_save_path, 'wb') as f:
+                            f.write(part.inline_data.data)
+                        image_saved = True
+                        break
+                    elif hasattr(part, 'text') and not image_saved:
+                        try:
+                            # 某些版本 SDK 的處理方式
+                            img_obj = part.as_image()
+                            img_obj.save(tryon_save_path)
+                            image_saved = True
+                        except: pass
+
+            if not image_saved:
+                tools_status["gemini_model"] = "fail"
+                return self._build_error_response(422, "合成失敗：未獲取到影像數據", tools_status, {})
+
+            # 8. 【關鍵修正】回傳標準 Dictionary 格式，避免 tuple .get 報錯
+            tools_status["gemini_model"] = "success"
+            return self._build_success_response(
+                tools_status,
+                model_image_filename=model_filename,     # 對應 View 的 model_image_filename
+                tryon_result_filename=tryon_filename,    # 對應 View 的 tryon_result_filename
+                style_analysis={
+                    "tech_spec": garment_description, 
+                    "hex_color": hex_color
+                }
+            )
+
+        except Exception as e:
+            logger.error(f"❌ 試穿合成過程出錯: {str(e)}")
+            # 同樣回傳字典格式
+            return self._build_error_response(500, f"內部合成引擎異常: {str(e)}", tools_status, {})

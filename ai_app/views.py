@@ -287,10 +287,7 @@ class TryCombineView(View):
             # 2. 调用 AI 合成结果（传入尺寸数据，不传颜色矩阵）
             result_tryon = processor.virtual_try_on(
                 model_image=model_image,
-                clean_clothes_path=clean_path,
-                clothes_category=clothes_category,
-                model_info=model_info,
-                garment_info=garment_info
+                clean_clothes_path=clean_path
             )
             
             if not result_tryon.get('success'):
