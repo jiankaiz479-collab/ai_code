@@ -1,7 +1,7 @@
 import os
 import json
 import logging
-from PIL import Image
+from PIL import Image, ImageEnhance
 from django.conf import settings
 from django.http import JsonResponse, HttpResponse
 from django.views import View
@@ -57,68 +57,89 @@ class RemoveBgView(View):
             processor = AIProcessor()
             logger.info(f"🔄 [RemoveBg] 啟動流水線: {clothes_image.name}")
             
-            result = processor.remove_background(clothes_image)
+            # 初始化 tools_status
+            tools_status = {
+                "rembg_engine": "running",
+                "opencv_masking": "not_started",
+                "gemini_consultant": "not_started"
+            }
+
+            # 1. 讀取並開啟圖片
+            if hasattr(clothes_image, 'seek'): clothes_image.seek(0)
+            input_pil = Image.open(clothes_image).convert("RGBA")
+
+            # 2. 執行 Rembg 去背
+            output_img, success, error = processor.remove_bg_with_rembg(input_pil)
+            if not success:
+                tools_status["rembg_engine"] = "fail"
+                return JsonResponse({"code": 422, "message": "去背失敗", "tools_status": tools_status}, status=422)
+            tools_status["rembg_engine"] = "success"
+
+            # 3. 清晰度檢測
+            is_clear, score, _ = processor.check_image_blur(output_img, threshold=50.0)
+            if not is_clear:
+                return JsonResponse({"code": 422, "message": f"圖片過於模糊 (Score: {round(score,1)})", "tools_status": tools_status}, status=422)
+
+            # 4. OpenCV 磨皮處理
+            tools_status["opencv_masking"] = "running"
+            r, g, b, a = output_img.split()
+            rgb_img = Image.merge('RGB', (r, g, b))
+            smoothed_rgb, success, error = processor.smooth_fabric_with_opencv(rgb_img)
+            if not success:
+                tools_status["opencv_masking"] = "fail"
+                return JsonResponse({"code": 422, "message": "磨皮處理失敗", "tools_status": tools_status}, status=422)
+            tools_status["opencv_masking"] = "success"
+
+            # 5. 合併 Alpha 通道與對比度增強
+            final_output = Image.merge('RGBA', (*smoothed_rgb.split(), a))
+            final_output = ImageEnhance.Contrast(final_output).enhance(0.85)
             
-            if result.get('success'):
-                file_name = result.get('file_name')
-                file_path = os.path.join(settings.MEDIA_ROOT, file_name)
-                
-                if not os.path.exists(file_path):
-                    logger.error(f"❌ [RemoveBg] 文件生成失敗: {file_path}")
-                    tools_status = result.get('tools_status', {})
-                    tools_status['file_save'] = 'fail'
-                    return JsonResponse({
-                        "code": 500,
-                        "message": "Internal Server Error: 文件生成失敗",
-                        "tools_status": tools_status,
-                        "debug_info": {"error_type": "FileNotFoundError", "detail": f"File not found: {file_name}"}
-                    }, status=500)
-                
-                analysis_data = {
-                    "code": 200,
-                    "message": result.get('message', "Processing Success"),
-                    "tools_status": result.get('tools_status', {}),
-                    "data": {
-                        "file_name": file_name,
-                        "file_format": "PNG",
-                        "style_analysis": result.get('style_analysis', {})
-                    }
+            # 6. 保存圖片
+            file_name, file_path = processor.get_unique_filename(prefix="processed", ext="png")
+            final_output.save(file_path, "PNG")
+
+            # 7. 風格分析 (Gemini Consultant)
+            tools_status["gemini_consultant"] = "running"
+            style_analysis, success, error = processor.analyze_clothing_style(file_path)
+            tools_status["gemini_consultant"] = "success" if success else "fail"
+
+            # ========== 構建 Multipart 響應 ==========
+            analysis_data = {
+                "code": 200,
+                "message": "Processing Success",
+                "tools_status": tools_status,
+                "data": {
+                    "file_name": file_name,
+                    "file_format": "PNG",
+                    "style_analysis": style_analysis
                 }
-                
-                if result.get('error_details'):
-                    analysis_data['error_details'] = result['error_details']
-                                
-                boundary = 'bg_removal_boundary'
-                response_body = []
-                
-                response_body.append(f'--{boundary}\r\n'.encode('utf-8'))
-                response_body.append(b'Content-Disposition: form-data; name="analysis"\r\n')
-                response_body.append(b'Content-Type: application/json\r\n\r\n')
-                response_body.append(json.dumps(analysis_data, indent=2, ensure_ascii=False).encode('utf-8'))
-                response_body.append(b'\r\n')
-                
-                response_body.append(f'--{boundary}\r\n'.encode('utf-8'))
-                response_body.append(f'Content-Disposition: form-data; name="processed_image"; filename="{file_name}"\r\n'.encode('utf-8'))
-                response_body.append(b'Content-Type: image/png\r\n\r\n')
-                
-                with open(file_path, 'rb') as f:
-                    response_body.append(f.read())
-                
-                response_body.append(b'\r\n')
-                response_body.append(f'--{boundary}--\r\n'.encode('utf-8'))
-                
-                logger.info(f"✅ [RemoveBg] 處理完成並回傳")
-                return HttpResponse(b''.join(response_body), content_type=f'multipart/form-data; boundary={boundary}')
-                
-            else:
-                error_code = result.get('code', 422)
-                logger.warning(f"⚠️ [RemoveBg] 處理失敗 (code={error_code})")
-                return JsonResponse({
-                    "code": error_code,
-                    "message": result.get('message', "Image processing failed"),
-                    "tools_status": result.get('tools_status', {}),
-                    "debug_info": result.get('debug_info', {})
-                }, status=error_code)
+            }
+            if not success:
+                analysis_data["error_details"] = {"error_message": error}
+
+            boundary = 'bg_removal_boundary'
+            response_body = []
+            
+            # Part 1: analysis (JSON)
+            response_body.append(f'--{boundary}\r\n'.encode('utf-8'))
+            response_body.append(b'Content-Disposition: form-data; name="analysis"\r\n')
+            response_body.append(b'Content-Type: application/json\r\n\r\n')
+            response_body.append(json.dumps(analysis_data, indent=2, ensure_ascii=False).encode('utf-8'))
+            response_body.append(b'\r\n')
+            
+            # Part 2: processed_image (Binary)
+            response_body.append(f'--{boundary}\r\n'.encode('utf-8'))
+            response_body.append(f'Content-Disposition: form-data; name="processed_image"; filename="{file_name}"\r\n'.encode('utf-8'))
+            response_body.append(b'Content-Type: image/png\r\n\r\n')
+            
+            with open(file_path, 'rb') as f:
+                response_body.append(f.read())
+            
+            response_body.append(b'\r\n')
+            response_body.append(f'--{boundary}--\r\n'.encode('utf-8'))
+            
+            logger.info(f"✅ [RemoveBg] 處理完成並回傳")
+            return HttpResponse(b''.join(response_body), content_type=f'multipart/form-data; boundary={boundary}')
 
         except Exception as e:
             logger.error(f"❌ [RemoveBg] 系統錯誤: {str(e)}")
@@ -126,7 +147,7 @@ class RemoveBgView(View):
             logger.error(traceback.format_exc())
             return JsonResponse({
                 "code": 500,
-                "message": "Internal Server Error: AI 模型運算失敗",
+                "message": "Internal Server Error",
                 "tools_status": {"rembg_engine": "error", "opencv_masking": "error", "gemini_consultant": "error"},
                 "debug_info": {"error_type": "RuntimeError", "detail": str(e)}
             }, status=500)
@@ -171,7 +192,7 @@ class TryCombineView(View):
                 "densepose": "skipped"
             }
 
-            # --- 步驟 1: 去背 ---
+            # --- 步驟 1: 取得去背素材 ---
             result_bg = processor.remove_background(garment_image)
             if not result_bg.get('success'):
                 return JsonResponse(result_bg, status=result_bg.get('code', 422))
