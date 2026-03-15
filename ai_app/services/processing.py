@@ -69,7 +69,7 @@ class AIProcessor(ImageProcessingInterface):
         return result
 
     # ==========================================
-    # [工具] 提取最大面积的前 N 个颜色
+    # [工具] 提取最大面積的前 N 個顏色
     # ==========================================
     def _extract_top_colors(self, image_path, top_n=3):
         try:
@@ -100,7 +100,7 @@ class AIProcessor(ImageProcessingInterface):
             return top_colors
             
         except Exception as e:
-            logger.error(f"颜色提取失败: {e}")
+            logger.error(f"顏色提取失敗: {e}")
             return [[255, 255, 255]] * top_n
     
     # ==========================================
@@ -327,59 +327,35 @@ JSON Structure:
         except Exception as e:
             logger.error(f"❌ 去背發生未知錯誤: {str(e)}")
             return self._build_error_response(500, "Internal Server Error: 系統運算失敗", tools_status, {'error': str(e)})
-#---------------------------------------------------------------------------------------------------------------------------
+
+    # ==========================================
+    # [VFX 工具] 視覺特徵提取
+    # ==========================================
     def _get_dominant_color(self, pil_img):
         """
         計算圖片主色調，但強制忽略透明背景 (Alpha = 0)
         """
         try:
-            # 1. 確保圖片是 RGBA 模式 (包含透明通道)
             img = pil_img.convert("RGBA")
-            img.thumbnail((200, 200)) # 縮小加速
-
-            # 2. 取得所有像素的顏色與計數
-            # getcolors 回傳格式: [(count, (r, g, b, a)), ...]
+            img.thumbnail((200, 200))
             colors = img.getcolors(maxcolors=200*200)
-
             if not colors:
                 return "#000000"
-
-            # 3. 過濾掉「透明」或「太接近白色/黑色」的雜訊
             valid_colors = []
             for count, color in colors:
                 r, g, b, a = color
-                
-                # 忽略透明像素 (Alpha < 128)
-                if a < 128: 
-                    continue
-                
-                # 忽略極度接近純白的像素 (通常是反光或去背邊緣)
-                if r > 250 and g > 250 and b > 250:
-                    continue
-                    
-                # 忽略極度接近純黑的像素 (通常是陰影)
-                if r < 5 and g < 5 and b < 5:
-                    continue
-
+                if a < 128: continue
+                if r > 250 and g > 250 and b > 250: continue
+                if r < 5 and g < 5 and b < 5: continue
                 valid_colors.append((count, (r, g, b)))
-
-            # 4. 如果過濾完沒東西了 (例如整張全白)，就回傳原本的
             if not valid_colors:
                 return "original color"
-
-            # 5. 找出出現次數最多的顏色
             valid_colors.sort(key=lambda x: x[0], reverse=True)
-            top_color = valid_colors[0][1] # (r, g, b)
-
-            # 6. 轉成 Hex Code
+            top_color = valid_colors[0][1]
             return '#{:02x}{:02x}{:02x}'.format(top_color[0], top_color[1], top_color[2])
-
         except Exception as e:
             logger.warning(f"⚠️ 取色失敗: {e}")
             return "original color"
-        
-
-
 
     def _create_texture_swatch(self, pil_img):
         """
@@ -392,9 +368,9 @@ JSON Structure:
         bottom = height * 0.75
         return pil_img.crop((left, top, right, bottom))
 
-    def analyze_garment(self, pil_cloth_img) -> str:
+    def analyze_garment(self, pil_cloth_img):
         """
-        讓 AI 擔任驗布師，產生極度詳細的規格書
+        修正版：回傳字典以供 View 層級更新 tools_status。
         """
         print(f"🧐 [AI 分析] 正在解析衣服細節...")
         try:
@@ -408,48 +384,54 @@ JSON Structure:
             ### Output Format (Strictly follow this structure)
             1. **Category**: (e.g., Hoodie, Maxi Dress, Denim Jacket)
             2. **Material Physics**:
-               - Texture: (e.g., Ribbed, Satin-finish, Distressed denim)
-               - Weight: (e.g., Heavyweight, Sheer, Stiff)
-               - Drape: (e.g., Flows loosely, Structured/Rigid)
+                - Texture: (e.g., Ribbed, Satin-finish, Distressed denim)
+                - Weight: (e.g., Heavyweight, Sheer, Stiff)
+                - Drape: (e.g., Flows loosely, Structured/Rigid)
             3. **Visual Details**:
-               - Color: (Specific shade description)
-               - Pattern: (Describe exact print, logo text, or graphics and their location)
+                - Color: (Specific shade description)
+                - Pattern: (Describe exact print, logo text, or graphics and their location)
             4. **Construction**:
-               - Fit: (Oversized, Slim, Boxy)
-               - Neckline/Sleeves: (Crew neck, Drop shoulder, Raglan)
-               - Details: (Visible stitching, buttons, zippers, pockets)
+                - Fit: (Oversized, Slim, Boxy)
+                - Neckline/Sleeves: (Crew neck, Drop shoulder, Raglan)
+                - Details: (Visible stitching, buttons, zippers, pockets)
 
             ### Constraint
             Describe EXACTLY what you see. Do not hallucinate accessories not present in the image.
             """
             
             response = self.client.models.generate_content(
-                model=self.analysis_model,
+                model=self.consultant_model,
                 contents=[pil_cloth_img, analysis_prompt]
             )
             
             description = response.text if response.text else "Standard garment"
             print(f"📝 分析結果: {description}")
-            return description
+            return {
+                "success": True,
+                "description": description,
+                "gemini_consultant": "success"
+            }
 
         except Exception as e:
-            print(f"⚠️ 分析失敗 (使用預設值): {e}")
-            return "A clothing item"
+            logger.error(f"⚠️ 分析失敗: {e}")
+            return {
+                "success": False,
+                "description": "A clothing item",
+                "gemini_consultant": "error"
+            }
 
-    
-    
-    #  功能 2: 虛擬試穿 (Virtual Try-On) - 最終強大版
     # ==========================================
-    def virtual_try_on(self, model_image, clean_clothes_path, model_info=None, garment_info=None):
+    # [核心合成] 虛擬試穿 
+    # ==========================================
+    def virtual_try_on(self, model_image, clean_clothes_path, hex_color, texture_swatch, garment_description, model_info=None, garment_info=None):
         """
-        虛擬試穿功能：融合取色、材質特寫與技術分析的高保真版本。
-        修復格式衝突，回傳標準 Dictionary 以供 View 使用。
+        最終版：接收 View 預提取的參數，執行合成。
         """
         tools_status = {
             "rembg": "success", 
             "opencv_smoothing": "success", 
-            "gemini_consultant": "running", 
-            "gemini_model": "not_started",
+            "gemini_consultant": "success", 
+            "gemini_model": "running",
             "densepose": "skipped"
         }
         
@@ -459,22 +441,14 @@ JSON Structure:
 
             # 1. 讀取圖片素材
             if hasattr(model_image, 'seek'): model_image.seek(0)
-            pil_model = Image.open(model_image)
-            pil_cloth = Image.open(clean_clothes_path)
+            pil_model = Image.open(model_image).convert("RGB")
+            pil_cloth = Image.open(clean_clothes_path).convert("RGB")
 
-            # 2. [VFX 邏輯] 取得色碼與材質特寫圖
-            hex_color = self._get_dominant_color(pil_cloth)
-            texture_swatch = self._create_texture_swatch(pil_cloth)
-            
-            # 3. [技術分析] 讓分析模型提取衣服細節
-            garment_description = self.analyze_garment(pil_cloth)
-            tools_status["gemini_consultant"] = "success"
-
-            # 4. 保存模特圖檔名備份 (對應 View 的需求)
+            # 2. 保存模特圖檔名備份
             model_filename, model_save_path = self.get_unique_filename(prefix="model", ext="png")
             pil_model.save(model_save_path, "PNG")
 
-            # 5. 構建合成 Prompt
+            # 3. 構建合成 Prompt
             m_info_str = json.dumps(model_info, ensure_ascii=False) if model_info else "Standard"
             prompt = f"""
             ### Role: Expert AI VFX Artist specializing in photorealistic virtual try-on.
@@ -491,8 +465,7 @@ JSON Structure:
             3. REALISM: Photorealistic high-resolution output. No filters.
             """
 
-            # 6. 調用 Gemini 進行合成
-            # 注意：這裡使用了 get_unique_filename 取得檔名與路徑
+            # 4. 調用 Gemini 進行合成
             tryon_filename, tryon_save_path = self.get_unique_filename(prefix="tryon_final", ext="png")
             
             response = self.client.models.generate_content(
@@ -500,7 +473,7 @@ JSON Structure:
                 contents=[pil_cloth, pil_model, texture_swatch, prompt]
             )
 
-            # 7. 提取產出的圖片並儲存
+            # 5. 提取產出的圖片並儲存
             image_saved = False
             if response.candidates and response.candidates[0].content.parts:
                 for part in response.candidates[0].content.parts:
@@ -511,22 +484,22 @@ JSON Structure:
                         break
                     elif hasattr(part, 'text') and not image_saved:
                         try:
-                            # 某些版本 SDK 的處理方式
                             img_obj = part.as_image()
                             img_obj.save(tryon_save_path)
                             image_saved = True
+                            break
                         except: pass
 
             if not image_saved:
                 tools_status["gemini_model"] = "fail"
                 return self._build_error_response(422, "合成失敗：未獲取到影像數據", tools_status, {})
 
-            # 8. 【關鍵修正】回傳標準 Dictionary 格式，避免 tuple .get 報錯
+            # 6. 回傳成功響應
             tools_status["gemini_model"] = "success"
             return self._build_success_response(
                 tools_status,
-                model_image_filename=model_filename,     # 對應 View 的 model_image_filename
-                tryon_result_filename=tryon_filename,    # 對應 View 的 tryon_result_filename
+                model_image_filename=model_filename,
+                tryon_result_filename=tryon_filename,
                 style_analysis={
                     "tech_spec": garment_description, 
                     "hex_color": hex_color
@@ -535,5 +508,6 @@ JSON Structure:
 
         except Exception as e:
             logger.error(f"❌ 試穿合成過程出錯: {str(e)}")
-            # 同樣回傳字典格式
-            return self._build_error_response(500, f"內部合成引擎異常: {str(e)}", tools_status, {})
+            import traceback
+            logger.error(traceback.format_exc())
+            return self._build_error_response(500, f"內部合成引擎異常: {str(e)}", tools_status, {"detail": str(e)})
