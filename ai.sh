@@ -1,65 +1,112 @@
 #!/bin/bash
+set -euo pipefail
 
-# 腳本說明：此腳本用於啟動 ai_code Django 應用，並自動處理 Docker 相關操作。
-# 它會檢查 Docker 是否安裝並運行，然後構建 Docker 鏡像並啟動容器。
-# 容器內的應用會運行在端口 8001，並映射到主機的 RUN_PORT 端口（從 .env 文件讀取）。
-# 新增：支持熱重載，通過卷掛載主機目錄到容器。
+################################################################################
+# ai_code Django 應用啟動腳本（Docker）
+# - 載入 .env
+# - 檢查必要變數
+# - 檢查本機 DensePose 權重是否存在
+# - 檢查 Docker 狀態
+# - build image / 重建 container / 啟動服務
+################################################################################
 
-# 載入環境變數從 .env 文件（如果存在）
-if [ -f .env ]; then
-    export $(grep -v '^#' .env | xargs)
+APP_IMAGE="${APP_IMAGE:-ai_code_app}"
+CONTAINER_NAME="${CONTAINER_NAME:-ai_code_container}"
+APP_PORT_IN_CONTAINER="8002"
+LOCAL_DENSEPOSE_WEIGHTS="$(pwd)/densepose_assets/model_final_162be9.pkl"
+
+on_error() {
+  local code=$?
+  echo ""
+  echo "❌ 啟動失敗（exit code: ${code}）"
+  echo "💡 先看上方錯誤，或執行：docker logs -f ${CONTAINER_NAME}"
+  exit "${code}"
+}
+trap on_error ERR
+
+# 1) 載入 .env
+if [ ! -f .env ]; then
+  echo "❌ 錯誤：找不到 .env 檔案"
+  exit 1
 fi
 
-# 檢查 RUN_PORT 是否設置
-if [ -z "$RUN_PORT" ]; then
-    echo "錯誤：.env 文件中未設置 RUN_PORT 變數。"
+set -a
+# shellcheck disable=SC1091
+source .env
+set +a
+echo "✅ 已載入 .env"
+
+# 2) 基礎變數檢查
+if [ -z "${RUN_PORT:-}" ]; then
+  echo "❌ 錯誤：.env 未設定 RUN_PORT"
+  exit 1
+fi
+
+if ! [[ "${RUN_PORT}" =~ ^[0-9]+$ ]] || [ "${RUN_PORT}" -lt 1 ] || [ "${RUN_PORT}" -gt 65535 ]; then
+  echo "❌ 錯誤：RUN_PORT 必須是 1-65535 的整數，當前值：${RUN_PORT}"
+  exit 1
+fi
+
+if [ -z "${GOOGLE_API_KEY:-}" ]; then
+  echo "❌ 錯誤：.env 未設定 GOOGLE_API_KEY"
+  exit 1
+fi
+
+echo "✅ RUN_PORT / GOOGLE_API_KEY 檢查通過"
+
+# 3) DensePose 設定檢查
+if [ "${ENABLE_DENSEPOSE:-false}" = "true" ]; then
+  if [ ! -f "${LOCAL_DENSEPOSE_WEIGHTS}" ]; then
+    echo "❌ 錯誤：找不到 DensePose 權重檔"
+    echo "   預期位置：${LOCAL_DENSEPOSE_WEIGHTS}"
     exit 1
-fi
+  fi
 
-# 檢查 Docker 是否安裝並運行
-if ! command -v docker &> /dev/null; then
-    echo "錯誤：Docker 未安裝。請先安裝 Docker。"
+  if [ "$(stat -c%s "${LOCAL_DENSEPOSE_WEIGHTS}")" -lt 10000000 ]; then
+    echo "❌ 錯誤：DensePose 權重檔太小，可能不是有效模型"
+    echo "   檔案：${LOCAL_DENSEPOSE_WEIGHTS}"
     exit 1
+  fi
+
+  echo "✅ DensePose 權重檢查通過"
 fi
 
-if ! docker info &> /dev/null; then
-    echo "錯誤：Docker 服務未運行。請啟動 Docker 服務。"
-    exit 1
+# 4) Docker 檢查
+if ! command -v docker >/dev/null 2>&1; then
+  echo "❌ 錯誤：Docker 未安裝"
+  exit 1
 fi
 
-echo "Docker 檢查通過，正在構建鏡像..."
-
-# 構建 Docker 鏡像
-docker build -t ai_code_app .
-
-if [ $? -ne 0 ]; then
-    echo "錯誤：Docker 鏡像構建失敗。"
-    exit 1
+if ! docker info >/dev/null 2>&1; then
+  echo "❌ 錯誤：Docker 服務未運行"
+  exit 1
 fi
 
-echo "鏡像構建成功，正在啟動容器（支持熱重載，且模型完全隔離）..."
+echo "✅ Docker 檢查通過"
 
-# 停止並刪除可能存在的舊容器
-docker stop ai_code_container 2>/dev/null
-docker rm ai_code_container 2>/dev/null
+# 5) 建置映像
+echo "🔨 開始建置映像：${APP_IMAGE}"
+docker build -t "${APP_IMAGE}" .
 
-# 啟動新容器
+# 6) 停止舊容器
+echo "🛑 停止舊容器（若存在）"
+docker stop "${CONTAINER_NAME}" >/dev/null 2>&1 || true
+docker rm "${CONTAINER_NAME}" >/dev/null 2>&1 || true
+
+# 7) 啟動新容器
+echo "🚀 啟動新容器：${CONTAINER_NAME}"
 docker run -d \
-    --name ai_code_container \
-    -p $RUN_PORT:8002 \
-    -v $(pwd):/app \
-    -v u2net_cache:/app/.u2net \
-    --env U2NET_HOME=/app/.u2net \
-    --env-file .env \
-    ai_code_app \
-    python manage.py runserver 0.0.0.0:8002
-
-if [ $? -eq 0 ]; then
-    echo "容器啟動成功！應用現在運行在 http://localhost:$RUN_PORT"
-    echo "隔離成功：模型現在鎖在容器內 /app/.u2net，主機不會再看到該資料夾。"
-    echo "要停止容器，請運行：docker stop ai_code_container"
-    echo "要查看日誌，請運行：docker logs ai_code_container"
-else
-    echo "錯誤：容器啟動失敗。"
-    exit 1
-fi
+  --name "${CONTAINER_NAME}" \
+  -p "${RUN_PORT}:${APP_PORT_IN_CONTAINER}" \
+  --env-file .env \
+  -v "$(pwd)/ai_app:/app/ai_app" \
+  -v "$(pwd)/densepose_assets:/app/densepose_assets" \
+  -v "$(pwd)/media:/app/media" \
+  "${APP_IMAGE}"
+# 8) 完成提示
+echo "-------------------------------------------------------"
+echo "🎉 容器啟動成功"
+echo "🔗 服務位址：http://localhost:${RUN_PORT}"
+echo "📊 查看日誌：docker logs -f ${CONTAINER_NAME}"
+echo "🛑 停止容器：docker stop ${CONTAINER_NAME}"
+echo "-------------------------------------------------------"

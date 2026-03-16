@@ -20,4 +20,4 @@ media/
 .DS_Store
 
 # 6. 忽略 AI 模型權重檔 (通常很大，不適合上傳 git)
-.u2net/.env
+.u2net/
