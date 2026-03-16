@@ -12,47 +12,56 @@ from PIL import Image, ImageEnhance
 from google import genai
 from google.genai import types
 
-
+# 設定日誌記錄器
 logger = logging.getLogger(__name__)
 
 class AIProcessor(ImageProcessingInterface):
+    """
+    AI 影像處理核心類別：負責去背、磨皮、顏色提取及 Gemini 試穿合成。
+    """
     
     def __init__(self):
+        # 從環境變數獲取 Google API Key
         self.api_key = os.getenv("GOOGLE_API_KEY")
+        
+        # 第一次嘗試初始化預設的 rembg session
         try:
             self.rembg_session = new_session()
         except Exception as e:
             logger.warning(f"rembg session 初始化失敗: {e}")
             self.rembg_session = None
 
+        # 初始化 Google GenAI Client
         try:
             self.client = genai.Client(api_key=self.api_key) if self.api_key else None
         except Exception as e:
             logger.error(f"⚠️ Gemini Client 初始化失敗: {e}")
             self.client = None
         
+        # 設定模型名稱 (預設使用 flash 進行諮詢，nano-banana 進行試穿)
         self.consultant_model = os.getenv("GEMINI_CONSULTANT_MODEL", "gemini-1.5-flash")
-        # 專案指定的生圖模型，確保環境變數為 nano-banana
         self.model_name = os.getenv("GEMINI_MODEL_NAME", "nano-banana")
         self.enable_densepose = os.getenv("ENABLE_DENSEPOSE", "false").lower() == "true"
 
+        # 💡 進階初始化：嘗試加載針對人像分割優化的模型 (u2net_human_seg)
         try:
-            # 💡 嘗試使用針對高精度Matting優化的模型，例如 'u2net_human_seg' 或 'isnet-general-use'
-            # 這需要你的 rembg 版本支援這些模型，並且會第一次呼叫時自動下載
             self.rembg_session = new_session(model_name='u2net_human_seg') 
             logger.info("✅ 已初始化針對人像 SEG 優化的 rembg session")
         except Exception as e:
             logger.warning(f"⚠️ rembg session 初始化失敗，使用預設模型: {e}")
-            self.rembg_session = new_session() # 失敗就用預設
+            self.rembg_session = new_session() 
 
     def get_unique_filename(self, prefix="img", ext="png"):
+        """
+        生成唯一檔名並確保儲存目錄存在。
+        """
         filename = f"{prefix}_{uuid.uuid4().hex[:8]}.{ext}"
         save_path = os.path.join(settings.MEDIA_ROOT, filename)
         os.makedirs(settings.MEDIA_ROOT, exist_ok=True)
         return filename, save_path
 
     # ==========================================
-    # [通用輔助] 構建錯誤響應
+    # [通用輔助] 構建錯誤響應 (標準化 API 回傳格式)
     # ==========================================
     def _build_error_response(self, code, message, tools_status, debug_info):
         return {
@@ -64,7 +73,7 @@ class AIProcessor(ImageProcessingInterface):
         }
 
     # ==========================================
-    # [通用輔助] 構建成功響應
+    # [通用輔助] 構建成功響應 (標準化 API 回傳格式)
     # ==========================================
     def _build_success_response(self, tools_status, **kwargs):
         result = {
@@ -73,13 +82,14 @@ class AIProcessor(ImageProcessingInterface):
             'message': kwargs.get('message', 'Success'),
             'tools_status': tools_status,
         }
+        # 動態加入回傳欄位
         for key in ['file_name', 'style_analysis', 'model_image_filename', 'tryon_result_filename', 'error_details']:
             if key in kwargs:
                 result[key] = kwargs[key]
         return result
 
     # ==========================================
-    # [工具] 提取最大面積的前 N 個顏色
+    # [工具] 提取最大面積的前 N 個顏色 (使用 K-Means 演算法)
     # ==========================================
     def _extract_top_colors(self, image_path, top_n=3):
         try:
@@ -87,19 +97,22 @@ class AIProcessor(ImageProcessingInterface):
             if img is None or img.shape[2] < 4:
                 return [[255, 255, 255]] * top_n
             
+            # 分離通道，利用 Alpha 通道進行腐蝕處理，避免邊緣雜色干擾
             b, g, r, a = cv2.split(img)
             kernel = np.ones((5,5), np.uint8)
             inner_mask = cv2.erode(a, kernel, iterations=2)
             rgb_img = cv2.merge([r, g, b])
-            valid_pixels = rgb_img[inner_mask > 0]
+            valid_pixels = rgb_img[inner_mask > 0] # 只提取非透明區域
             
             if len(valid_pixels) == 0:
                 return [[255, 255, 255]] * top_n
             
+            # K-Means 聚類分析主要顏色
             pixels = valid_pixels.reshape(-1, 3).astype(np.float32)
             criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 100, 0.2)
             _, labels, centers = cv2.kmeans(pixels, top_n, None, criteria, 10, cv2.KMEANS_PP_CENTERS)
             
+            # 根據出現頻率排序
             unique, counts = np.unique(labels, return_counts=True)
             sorted_indices = np.argsort(-counts)
             
@@ -114,7 +127,7 @@ class AIProcessor(ImageProcessingInterface):
             return [[255, 255, 255]] * top_n
     
     # ==========================================
-    # [後期開發] 語意遮罩生成 
+    # [後期開發] 語意遮罩生成 (利用 Gemini 識別陰影與高光區域)
     # ==========================================
     def _get_semantic_ruffle_mask(self, pil_img, gray_cv_img):
         h, w = gray_cv_img.shape
@@ -124,6 +137,7 @@ class AIProcessor(ImageProcessingInterface):
         Normalized to 1000.
         """
         try:
+            # 調用多模態模型獲取視覺座標
             response = self.client.models.generate_content(
                 model=self.consultant_model,
                 contents=[pil_img, prompt],
@@ -133,23 +147,26 @@ class AIProcessor(ImageProcessingInterface):
             mask = np.zeros((h, w), dtype=np.uint8)
             for item in data:
                 ymin, xmin, ymax, xmax = item['box_2d']
+                # 將正規化座標轉換回影像尺寸
                 cv_ymin, cv_xmin = int(ymin * h / 1000), int(xmin * w / 1000)
                 cv_ymax, cv_xmax = int(ymax * h / 1000), int(xmax * w / 1000)
                 cv2.rectangle(mask, (cv_xmin, cv_ymin), (cv_xmax, cv_ymax), 255, -1)
+            # 使用大尺寸高斯模糊平衡遮罩邊緣
             return cv2.GaussianBlur(mask, (61, 61), 0)
         except Exception:
             return np.zeros((h, w), dtype=np.uint8)
 
     # ==========================================
-    # [核心] OpenCV 磨皮引擎 
+    # [核心] OpenCV 磨皮引擎 (雙邊濾波 + 動態遮罩)
     # ==========================================
     def _opencv_smooth_fabric(self, pil_img):
         try:
-            USE_SEMANTIC_LOGIC = False
+            USE_SEMANTIC_LOGIC = False # 開關：是否使用 AI 輔助遮罩
             open_cv_image = np.array(pil_img.convert('RGB'))
             img = cv2.cvtColor(open_cv_image, cv2.COLOR_RGB2BGR)
             gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
             
+            # 使用大津演算法 (Otsu) 提取亮度細節
             _, brightness_detail = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
             
             if USE_SEMANTIC_LOGIC:
@@ -157,20 +174,24 @@ class AIProcessor(ImageProcessingInterface):
                 combined_mask = cv2.addWeighted(brightness_detail, 0.4, semantic_area, 0.6, 0)
                 smooth_power = 200 
             else:
+                # 傳統邏輯：提取高光區域與亮度細節
                 max_val = np.max(gray)
                 _, highlight_mask = cv2.threshold(gray, max_val * 0.9, 255, cv2.THRESH_BINARY)
                 combined_mask = cv2.bitwise_or(brightness_detail, highlight_mask)
                 smooth_power = 160
 
+            # 建立保護遮罩，避免在褶皺處過度模糊
             blur_size = int(max(img.shape[:2]) / 40)
             if blur_size % 2 == 0: blur_size += 1
             combined_mask = cv2.GaussianBlur(combined_mask, (blur_size, blur_size), 0)
             mask_3d = cv2.cvtColor(combined_mask, cv2.COLOR_GRAY2BGR).astype(float) / 255.0
 
+            # 雙邊濾波：在保留邊緣的同時平滑表面細節
             full_smoothed = cv2.bilateralFilter(img, d=15, sigmaColor=smooth_power, sigmaSpace=75)
             result = (img.astype(float) * (1.0 - mask_3d) + full_smoothed.astype(float) * mask_3d)
             result = result.clip(0, 255).astype(np.uint8)
 
+            # 動態 Gamma 校正：根據影像平均亮度調整暗部細節
             avg_brightness = np.mean(gray)
             dynamic_gamma = 1.4 if avg_brightness < 127 else 1.1
             invGamma = 1.0 / dynamic_gamma
@@ -182,7 +203,10 @@ class AIProcessor(ImageProcessingInterface):
             logger.error(f"OpenCV 磨皮失敗: {e}")
             return pil_img
 
-    def remove_bg_with_rembg(self, input_img):
+    def remove_background(self, input_img):
+        """
+        封裝 Rembg 去背功能並自動裁剪透明邊框。
+        """
         try:
             output_img = remove(input_img, session=self.rembg_session)
             bbox = output_img.getbbox()
@@ -194,6 +218,9 @@ class AIProcessor(ImageProcessingInterface):
             return None, False, str(e)
 
     def check_image_blur(self, pil_img, threshold=50.0):
+        """
+        使用拉普拉斯變異數檢測影像是否過於模糊。
+        """
         try:
             gray = cv2.cvtColor(np.array(pil_img.convert('RGB')), cv2.COLOR_RGB2GRAY)
             laplacian_var = cv2.Laplacian(gray, cv2.CV_64F).var()
@@ -204,6 +231,9 @@ class AIProcessor(ImageProcessingInterface):
             return True, 0, str(e)
 
     def smooth_fabric_with_opencv(self, rgb_img):
+        """
+        公開接口：對布料進行磨皮處理。
+        """
         try:
             smoothed_rgb = self._opencv_smooth_fabric(rgb_img)
             return smoothed_rgb, True, None
@@ -212,6 +242,9 @@ class AIProcessor(ImageProcessingInterface):
             return None, False, str(e)
 
     def analyze_clothing_style(self, image_path):
+        """
+        利用 Gemini 分析服裝類別、風格標籤與主色。
+        """
         failed_result = {
             "clothes_category": "failed",
             "style_name": "failed",
@@ -251,6 +284,7 @@ class AIProcessor(ImageProcessingInterface):
                 "color_name": ["Color1", "Color2", ...]
                 }
                 """
+            # 強制要求 JSON 回傳格式
             response = self.client.models.generate_content(
                 model=self.consultant_model,
                 contents=[pil_img, prompt],
@@ -275,88 +309,24 @@ class AIProcessor(ImageProcessingInterface):
             return failed_result, False, error_msg
 
     # ==========================================
-    # [功能 1] 去背並分析風格
-    # ==========================================
-    def remove_background(self, clothes_image):
-        tools_status = {
-            "rembg_engine": "not_started",
-            "opencv_masking": "not_started",
-            "gemini_consultant": "not_started"
-        }
-        
-        try:
-            if hasattr(clothes_image, 'seek'):
-                clothes_image.seek(0)
-            input_img = Image.open(clothes_image).convert("RGBA")
-            
-            # Step 1: Rembg 去背
-            logger.info("🔄 [Step 1/4] 啟動 Rembg 去背引擎...")
-            output_img, success, error = self.remove_bg_with_rembg(input_img)
-            if not success:
-                tools_status["rembg_engine"] = "fail"
-                return self._build_error_response(422, "Unprocessable Entity: 去背處理失敗", tools_status, {'error': error})
-            tools_status["rembg_engine"] = "success"
-            
-            # Step 2: 清晰度檢測
-            is_clear, score, _ = self.check_image_blur(output_img, threshold=50.0)
-            if not is_clear:
-                return self._build_error_response(422, "Unprocessable Entity: 圖片過於模糊", tools_status, {'score': round(score, 1)})
-            
-            # Step 3: OpenCV 磨皮
-            r, g, b, a = output_img.split()
-            rgb_img = Image.merge('RGB', (r, g, b))
-            smoothed_rgb, success, error = self.smooth_fabric_with_opencv(rgb_img)
-            if not success:
-                tools_status["opencv_masking"] = "fail"
-                return self._build_error_response(422, "Unprocessable Entity: 圖片處理失敗", tools_status, {'error': error})
-            tools_status["opencv_masking"] = "success"
-
-            # Step 4: 保存圖片
-            final_output = Image.merge('RGBA', (*smoothed_rgb.split(), a))
-            final_output = ImageEnhance.Contrast(final_output).enhance(0.85)
-            filename, save_path = self.get_unique_filename(prefix="processed", ext="png")
-            final_output.save(save_path, "PNG")
-
-            # Bonus: 風格分析
-            style_analysis, success, error = self.analyze_clothing_style(save_path)
-            if success:
-                tools_status["gemini_consultant"] = "success"
-            else:
-                tools_status["gemini_consultant"] = "fail"
-            
-            success_params = {
-                'message': 'Processing Success',
-                'file_name': filename,
-                'style_analysis': style_analysis
-            }
-            if tools_status["gemini_consultant"] == "fail":
-                success_params['error_details'] = {"error_message": error}
-
-            return self._build_success_response(tools_status, **success_params)
-
-        except Exception as e:
-            logger.error(f"❌ 去背發生未知錯誤: {str(e)}")
-            return self._build_error_response(500, "Internal Server Error: 系統運算失敗", tools_status, {'error': str(e)})
-
-    # ==========================================
     # [VFX 工具] 視覺特徵提取
     # ==========================================
     def _get_dominant_color(self, pil_img):
         """
-        計算圖片主色調，但強制忽略透明背景 (Alpha = 0)
+        計算圖片主色調，過濾透明背景、極白與極黑雜訊。
         """
         try:
             img = pil_img.convert("RGBA")
-            img.thumbnail((200, 200))
+            img.thumbnail((200, 200)) # 縮小尺寸提高運算速度
             colors = img.getcolors(maxcolors=200*200)
             if not colors:
                 return "#000000"
             valid_colors = []
             for count, color in colors:
                 r, g, b, a = color
-                if a < 128: continue
-                if r > 250 and g > 250 and b > 250: continue
-                if r < 5 and g < 5 and b < 5: continue
+                if a < 128: continue # 過濾透明像素
+                if r > 250 and g > 250 and b > 250: continue # 過濾接近白色
+                if r < 5 and g < 5 and b < 5: continue # 過濾接近黑色
                 valid_colors.append((count, (r, g, b)))
             if not valid_colors:
                 return "original color"
@@ -369,7 +339,7 @@ class AIProcessor(ImageProcessingInterface):
 
     def _create_texture_swatch(self, pil_img):
         """
-        裁切圖片中心 50% 的區域，當作材質特寫餵給 AI
+        裁切圖片中心區域，生成材質採樣塊 (Swatch)。
         """
         width, height = pil_img.size
         left = width * 0.25
@@ -380,7 +350,7 @@ class AIProcessor(ImageProcessingInterface):
 
     def analyze_garment(self, pil_cloth_img):
         """
-        修正版：回傳字典以供 View 層級更新 tools_status。
+        技術分析：生成服裝的「數位孿生」描述，包含材質、懸垂性與結構細節。
         """
         print(f"🧐 [AI 分析] 正在解析衣服細節...")
         try:
@@ -432,13 +402,13 @@ class AIProcessor(ImageProcessingInterface):
 
 
     # ==========================================
-    # [核心合成] 虛擬試穿 
+    # [核心合成] 虛擬試穿 (VFX 生圖引擎)
     # ==========================================
 
     def virtual_try_on(self, model_image, clean_clothes_path, hex_color, texture_swatch, garment_description, model_info=None, garment_info=None):
         """
-        最終版：接收 View 預提取的參數，執行合成。
-        整合強化版 Prompt（白色背景、材質不透明、色彩保真）。
+        使用 Nano-Banana 模型執行試穿合成。
+        整合了材質保真度、顏色鎖定與背景純化邏輯。
         """
         tools_status = {
             "rembg": "success", 
@@ -452,51 +422,62 @@ class AIProcessor(ImageProcessingInterface):
             if not self.client:
                 return self._build_error_response(500, "Gemini Client 未初始化", tools_status, {})
 
-            # 1. 讀取圖片素材
+            # 1. 讀取與正規化圖片素材
             if hasattr(model_image, 'seek'): model_image.seek(0)
             pil_model = Image.open(model_image).convert("RGB")
             pil_cloth = Image.open(clean_clothes_path).convert("RGB")
 
-            # 2. 保存模特圖檔名備份 (對應 View 的需求)
+            # 2. 保存原始模特圖作為備份
             model_filename, model_save_path = self.get_unique_filename(prefix="model", ext="png")
             pil_model.save(model_save_path, "PNG")
 
-            # 3. 構建合成 Prompt (強化材質不透明度與色彩精準度)
+            # 3. 構建合成指令
             prompt = f"""
-### ROLE
-Expert AI Fashion VFX Artist. Your mission is to perform a high-fidelity virtual try-on that meets professional runway photography standards.
+            ### Role
+            You are an expert AI VFX Artist specializing in photorealistic virtual try-on.
 
-### TARGET SPECS
-- **Subject**: Liu Wen (Image 2). Maintain her distinctive bone structure, facial features, and windswept hair with 100% pixel-level fidelity.
-- **Garment**: The pink ruffled blouse from Image 1.
-- **Target Color**: Hex {hex_color} (Rose Quartz). Apply with absolute precision.
-- **Texture Reference**: Image 3 (8K Micro-texture swatch).
+            ### Input Data
+            - **Image 1 (Garment)**: The full view of the clothing.
+            - **Image 2 (Model)**: The target person.
+            - **Image 3 (Texture Detail)**: A MICROSCOPIC CLOSE-UP of the fabric. Use this for texture mapping.
+            
+            ### Technical Specs
+            - **Target Color Code**: {hex_color} (You MUST strictly adhere to this Hex Color)
+            - **Garment Description**: {garment_description}
 
-### EXECUTION STEPS
-1. **Material Integrity (CRITICAL)**:
-   - **100% Opacity**: Disable all sub-surface scattering. The fabric must be solid and non-transparent. 
-   - **Texture Mapping**: Apply the micro-denier weave from Image 3. Ensure the fabric grain is visible and sharp.
-   - **Drape & Warp**: Tailor the blouse to the model’s frame in Image 2. The V-neckline and cascading ruffles must drape naturally over the shoulders without clipping.
+            ### Task
+            Generate a photorealistic image of the **FULL PERSON (head-to-toe)** from [Image 2] wearing the garment from [Image 1].
 
-2. **Color & Lighting**:
-   - **D65 Neutral Light**: Use a neutral studio lighting rig to ensure Hex {hex_color} does not shift towards warm or cool tones.
-   - **Shadows**: Render realistic contact shadows within the fabric folds, but keep the overall color vibrant.
+            ### Execution Instructions
+            1. **Identity & Body Preservation (CRITICAL)**: 
+                - **Face**: You MUST keep the model's facial features (eyes, nose, mouth, jawline), expression, and skin texture EXACTLY the same as in [Image 2]. 
+                - **Body Shape**: Do NOT alter the model's physique. The height, weight, proportions, and body measurements must remain UNCHANGED. Do not make the model slimmer or more muscular.
+                - **Pose**: Keep the pose identical to the original image.
 
-3. **Background & Aesthetic**:
-   - **Pure White (#FFFFFF)**: Isolate the model against a solid white studio background.
-   - **Studio Look**: Create a seamless "floating" aesthetic with neutralized contact shadows at the feet.
+            2. **Color Fidelity**: 
+                - The output garment MUST match the Target Color Code {hex_color} exactly.
+                - Do not let the scene lighting wash out the color.
 
-### NEGATIVE CONSTRAINTS
-- NO facial or body alteration. 
-- NO transparency or sheer fabric effects.
-- NO environmental color bleeding.
-- NO cartoon, illustration, or low-resolution artifacts.
+            3. **Material Rendering**:
+                - Apply the texture details visible in [Image 3] to the entire garment.
+                - **Reflectance**: Observe how light hits the fabric in [Image 1] (matte vs glossy) and replicate it.
 
-### OUTPUT
-A high-resolution, photorealistic fashion editorial image of the model in a confident runway stride.
-"""
+            4. **Garment Fitting & Framing**:
+                - Warp and shape the garment to fit the model's body naturally.
+                - The clothes should wrap around the body's actual volume, not change the body's volume.
+                - **Full Body Representation**: Ensure the entire person is visible in the frame, from the head down to the feet. Do not crop the person.
 
-            # 4. 調用 Gemini 進行合成
+            ### Negative Constraints (STRICTLY FORBIDDEN)
+            - Do not change the model's face, body shape, gender, or ethnicity.
+            - Do not generate a cartoon or illustration style. Output must be a Photo.
+            - Do not "beautify" or apply filters to the model.
+            - **Do not crop the head, hands, or feet. Avoid any half-body or close-up shots.**
+
+            ### Output
+            A single high-resolution photorealistic **full-body image (entire person visible)**.
+            """
+
+            # 4. 調用模型執行影像生成
             tryon_filename, tryon_save_path = self.get_unique_filename(prefix="tryon_final", ext="png")
             
             response = self.client.models.generate_content(
@@ -504,17 +485,17 @@ A high-resolution, photorealistic fashion editorial image of the model in a conf
                 contents=[pil_cloth, pil_model, texture_swatch, prompt]
             )
 
-            # 5. 提取產出的圖片並儲存 (加入多層安全檢查防止 NoneType 錯誤)
+            # 5. 提取二進位數據或 PIL 影像並存檔
             image_saved = False
             if response and response.candidates and response.candidates[0].content.parts:
                 for part in response.candidates[0].content.parts:
-                    # 優先嘗試 inline_data 格式
+                    # 情況 A：模型回傳二進位 byte 數據 (高效能)
                     if hasattr(part, 'inline_data') and part.inline_data and part.inline_data.data:
                         with open(tryon_save_path, 'wb') as f:
                             f.write(part.inline_data.data)
                         image_saved = True
                         break
-                    # 次要嘗試 text/image 轉換格式
+                    # 情況 B：模型回傳物件，需手動轉換 (Gemini 相容性)
                     elif hasattr(part, 'text') and not image_saved:
                         try:
                             img_obj = part.as_image()
@@ -525,13 +506,12 @@ A high-resolution, photorealistic fashion editorial image of the model in a conf
 
             if not image_saved:
                 tools_status["gemini_model"] = "fail"
-                # 判斷是否為額度耗盡
                 err_message = "合成失敗：未獲取到影像數據"
                 if not response:
                     err_message = "API 無回應 (可能是 429 Resource Exhausted)"
                 return self._build_error_response(422, err_message, tools_status, {})
 
-            # 6. 回傳成功響應
+            # 6. 完成流程並回傳結果資訊
             tools_status["gemini_model"] = "success"
             return self._build_success_response(
                 tools_status,
