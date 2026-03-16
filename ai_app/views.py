@@ -155,9 +155,13 @@ class RemoveBgView(View):
 # ==========================================
 # 2. 虛擬試穿 (Virtual Try-On)
 # ==========================================
+
+
+
 @method_decorator(csrf_exempt, name='dispatch')
 class TryCombineView(View):
     def post(self, request, *args, **kwargs):
+        # ========== 1. 接收文件與資料 ==========
         model_image = request.FILES.get('model_image')
         garment_image = request.FILES.get('clothes_image')
 
@@ -167,118 +171,130 @@ class TryCombineView(View):
         except json.JSONDecodeError:
             data = {}
 
+        # ========== 2. 基礎驗證 ==========
         if not model_image or not garment_image:
             logger.warning("⚠️ [TryOn] 缺少圖片")
             return JsonResponse({
                 "code": 400,
                 "message": "Bad Request: 缺少必要圖片",
                 "tools_status": {
-                    "rembg": "not_started",
+                    "rembg_people": "skipped",
                     "opencv_smoothing": "not_started",
                     "gemini_consultant": "not_started",
                     "gemini_model": "not_started"
                 }
             }, status=400)
 
+        # 暫存檔案清單，用於最後清理
+        temp_files = []
+
         try:
             processor = AIProcessor()
-            logger.info("🔄 [TryOn] 啟動流水線控制...")
+            logger.info("🔄 [TryOn] 啟動流水線控制 (跳過去背流程)...")
             
+            # 更新 tools_status，將 rembg 設為 skipped
             tools_status = {
-                "rembg": "running",
+                "rembg_people": "skipped",
                 "opencv_smoothing": "success", 
                 "gemini_consultant": "not_started", 
-                "gemini_model": "not_started",
-                "densepose": "skipped"
+                "gemini_model": "not_started"
             }
 
-            # --- 步驟 1: 取得去背素材 ---
-            result_bg = processor.remove_background(garment_image)
-            if not result_bg.get('success'):
-                return JsonResponse(result_bg, status=result_bg.get('code', 422))
-            
-            tools_status["rembg"] = "success"
-            clean_path = os.path.join(settings.MEDIA_ROOT, result_bg.get('file_name'))
-            
-            pil_cloth = Image.open(clean_path).convert("RGBA")
+            # --- 步驟 1: 直接儲存模特兒圖 (暫存) ---
+            tmp_m_name, tmp_m_path = processor.get_unique_filename(prefix="tmp_model", ext="png")
+            if hasattr(model_image, 'seek'): model_image.seek(0)
+            with open(tmp_m_path, 'wb+') as dest:
+                for chunk in model_image.chunks():
+                    dest.write(chunk)
+            temp_files.append(tmp_m_path)
 
-            # --- 步驟 2: 視覺提取 ---
+            # --- 步驟 2: 直接儲存衣服圖 (暫存) ---
+            tmp_g_name, tmp_g_path = processor.get_unique_filename(prefix="tmp_garment", ext="png")
+            if hasattr(garment_image, 'seek'): garment_image.seek(0)
+            with open(tmp_g_path, 'wb+') as dest:
+                for chunk in garment_image.chunks():
+                    dest.write(chunk)
+            temp_files.append(tmp_g_path)
+            
+            # 開啟 PIL 物件進行後續分析
+            pil_cloth = Image.open(tmp_g_path).convert("RGBA")
+
+            # --- 步驟 3: 視覺提取 ---
             hex_color = processor._get_dominant_color(pil_cloth)
             texture_swatch = processor._create_texture_swatch(pil_cloth)
             
-            # --- 步驟 3: 技術分析 ---
+            # --- 步驟 4: 技術分析 ---
             tools_status["gemini_consultant"] = "running"
             analysis_res = processor.analyze_garment(pil_cloth)
-            
             garment_description = analysis_res.get('description')
             tools_status["gemini_consultant"] = analysis_res.get('gemini_consultant', "success")
 
-            # --- 步驟 4: 虛擬試穿 ---
+            # --- 步驟 5: 執行合成 (使用直接儲存的模特兒圖) ---
             tools_status["gemini_model"] = "running"
-            result_tryon = processor.virtual_try_on(
-                model_image=model_image,
-                clean_clothes_path=clean_path,
-                hex_color=hex_color,
-                texture_swatch=texture_swatch,
-                garment_description=garment_description,
-                model_info=data.get('model_info', {}),
-                garment_info=data.get('garment_info', {})
-            )
+            
+            with open(tmp_m_path, 'rb') as final_m_file:
+                result_tryon = processor.virtual_try_on(
+                    model_image=final_m_file,
+                    clean_clothes_path=tmp_g_path,
+                    hex_color=hex_color,
+                    texture_swatch=texture_swatch,
+                    garment_description=garment_description,
+                    model_info=data.get('model_info', {}),
+                    garment_info=data.get('garment_info', {})
+                )
             
             if not result_tryon.get('success'):
-                error_code = result_tryon.get('code', 422)
-                return JsonResponse({
-                    "code": error_code,
-                    "message": result_tryon.get('message', "Virtual try-on failed"),
-                    "tools_status": result_tryon.get('tools_status', tools_status),
-                    "debug_info": result_tryon.get('debug_info', {})
-                }, status=error_code)
+                return JsonResponse(result_tryon, status=result_tryon.get('code', 422))
             
             tools_status["gemini_model"] = "success"
             tryon_filename = result_tryon.get('tryon_result_filename')
             tryon_path = os.path.join(settings.MEDIA_ROOT, tryon_filename)
 
-            # ========== 3. 構建成功的 Multipart 響應 ==========
+            # ========== 3. 構建 Multipart/Mixed 響應 ==========
             analysis_data = {
                 "code": 200,
                 "message": "Success",
                 "tools_status": tools_status,
                 "data": {
                     "file_name": tryon_filename,
-                    "file_format": "PNG",
-                    "style_analysis": {
-                        "tech_spec": garment_description,
-                        "hex_color": hex_color
-                    }
+                    "file_format": "PNG"
                 }
             }
 
             boundary = 'frame_boundary'
             response_body = []
             
+            # Part 1: JSON
             response_body.append(f'--{boundary}\r\n'.encode('utf-8'))
-            response_body.append(b'Content-Disposition: form-data; name="analysis"\r\n')
             response_body.append(b'Content-Type: application/json\r\n\r\n')
             response_body.append(json.dumps(analysis_data, indent=2, ensure_ascii=False).encode('utf-8'))
             response_body.append(b'\r\n')
             
+            # Part 2: Image Binary
             response_body.append(f'--{boundary}\r\n'.encode('utf-8'))
-            response_body.append(f'Content-Disposition: form-data; name="processed_image"; filename="{tryon_filename}"\r\n'.encode('utf-8'))
-            response_body.append(b'Content-Type: image/png\r\n\r\n')
+            response_body.append(b'Content-Type: image/png\r\n')
+            response_body.append(f'Content-Disposition: attachment; filename="{tryon_filename}"\r\n\r\n'.encode('utf-8'))
             with open(tryon_path, 'rb') as f:
                 response_body.append(f.read())
             response_body.append(b'\r\n')
+            
             response_body.append(f'--{boundary}--\r\n'.encode('utf-8'))
             
-            logger.info(f"✅ [TryOn] 合成流水線完成")
-            return HttpResponse(b''.join(response_body), content_type=f'multipart/form-data; boundary={boundary}')
+            # --- 最終清理：刪除所有中間暫存檔 ---
+            for f_path in temp_files:
+                if os.path.exists(f_path):
+                    os.remove(f_path)
+            
+            logger.info(f"✅ [TryOn] 合成完成。中間檔已清理: {tryon_filename}")
+            return HttpResponse(
+                b''.join(response_body), 
+                content_type=f'multipart/mixed; boundary={boundary}'
+            )
 
         except Exception as e:
-            logger.error(f"❌ [TryOn] 發生系統錯誤: {str(e)}")
+            for f_path in temp_files:
+                if os.path.exists(f_path): os.remove(f_path)
+            logger.error(f"❌ [TryOn] 系統錯誤: {str(e)}")
             import traceback
             logger.error(traceback.format_exc())
-            return JsonResponse({
-                "code": 500, 
-                "message": "Internal Server Error",
-                "debug_info": {"detail": str(e)}
-            }, status=500)
+            return JsonResponse({"code": 500, "message": "Internal Server Error"}, status=500)

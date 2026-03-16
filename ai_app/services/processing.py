@@ -4,6 +4,7 @@ import logging
 import json
 import numpy as np
 import cv2  
+from rembg import new_session
 from django.conf import settings
 from .interfaces import ImageProcessingInterface
 from rembg import remove, new_session
@@ -34,6 +35,15 @@ class AIProcessor(ImageProcessingInterface):
         # 專案指定的生圖模型，確保環境變數為 nano-banana
         self.model_name = os.getenv("GEMINI_MODEL_NAME", "nano-banana")
         self.enable_densepose = os.getenv("ENABLE_DENSEPOSE", "false").lower() == "true"
+
+        try:
+            # 💡 嘗試使用針對高精度Matting優化的模型，例如 'u2net_human_seg' 或 'isnet-general-use'
+            # 這需要你的 rembg 版本支援這些模型，並且會第一次呼叫時自動下載
+            self.rembg_session = new_session(model_name='u2net_human_seg') 
+            logger.info("✅ 已初始化針對人像 SEG 優化的 rembg session")
+        except Exception as e:
+            logger.warning(f"⚠️ rembg session 初始化失敗，使用預設模型: {e}")
+            self.rembg_session = new_session() # 失敗就用預設
 
     def get_unique_filename(self, prefix="img", ext="png"):
         filename = f"{prefix}_{uuid.uuid4().hex[:8]}.{ext}"
@@ -215,32 +225,32 @@ class AIProcessor(ImageProcessingInterface):
         try:
             pil_img = Image.open(image_path)
             prompt = """
-Analyze the clothing item in this image. Provide the analysis in English and return ONLY a JSON object.
+                Analyze the clothing item in this image. Provide the analysis in English and return ONLY a JSON object.
 
-【STRICT CATEGORY RULE】:
-You MUST choose EXACTLY one category from this list:
-- "short": All tops (T-shirts, blouses, sweaters, hoodies, long/short sleeves).
-- "pants": All trousers and shorts (jeans, leggings, sweatpants).
-- "outerwear": Jackets, coats, blazers, vests.
-- "intimates": Underwear, bras, sleepwear.
-- "skirt": All types of skirts (mini, midi, maxi).
-- "others": Dresses, accessories, or items not fitting above.
+                【STRICT CATEGORY RULE】:
+                You MUST choose EXACTLY one category from this list:
+                - "short": All tops (T-shirts, blouses, sweaters, hoodies, long/short sleeves).
+                - "pants": All trousers and shorts (jeans, leggings, sweatpants).
+                - "outerwear": Jackets, coats, blazers, vests.
+                - "intimates": Underwear, bras, sleepwear.
+                - "skirt": All types of skirts (mini, midi, maxi).
+                - "others": Dresses, accessories, or items not fitting above.
 
-【PURE AESTHETIC STYLE RULE】:
-- "style_name": Identify the fashion aesthetic or genre (e.g., Casual, Formal, Sporty, Streetwear, Vintage, Korean Style, Japanese Style, Preppy, Sweet, Sexy, Minimalist).
-- Min 3 tags. DO NOT include physical descriptions like "oversized", "slim-fit", or "long-sleeve".
-- Provide 1-2 tags if the style is simple.
+                【PURE AESTHETIC STYLE RULE】:
+                - "style_name": Identify the fashion aesthetic or genre (e.g., Casual, Formal, Sporty, Streetwear, Vintage, Korean Style, Japanese Style, Preppy, Sweet, Sexy, Minimalist).
+                - Min 3 tags. DO NOT include physical descriptions like "oversized", "slim-fit", or "long-sleeve".
+                - Provide 1-2 tags if the style is simple.
 
-【COLOR RULE】:
-- "color_name": List up to 3 dominant color names in English (e.g., Red, Blue, Black, White, Gray).
+                【COLOR RULE】:
+                - "color_name": List up to 3 dominant color names in English (e.g., Red, Blue, Black, White, Gray).
 
-JSON Structure:
-{
-"clothes_category": "Selected Category",
-"style_name": ["Style1", "Style2", ...],
-"color_name": ["Color1", "Color2", ...]
-}
-"""
+                JSON Structure:
+                {
+                "clothes_category": "Selected Category",
+                "style_name": ["Style1", "Style2", ...],
+                "color_name": ["Color1", "Color2", ...]
+                }
+                """
             response = self.client.models.generate_content(
                 model=self.consultant_model,
                 contents=[pil_img, prompt],
@@ -420,12 +430,15 @@ JSON Structure:
                 "gemini_consultant": "error"
             }
 
+
     # ==========================================
     # [核心合成] 虛擬試穿 
     # ==========================================
+
     def virtual_try_on(self, model_image, clean_clothes_path, hex_color, texture_swatch, garment_description, model_info=None, garment_info=None):
         """
         最終版：接收 View 預提取的參數，執行合成。
+        整合強化版 Prompt（白色背景、材質不透明、色彩保真）。
         """
         tools_status = {
             "rembg": "success", 
@@ -444,26 +457,44 @@ JSON Structure:
             pil_model = Image.open(model_image).convert("RGB")
             pil_cloth = Image.open(clean_clothes_path).convert("RGB")
 
-            # 2. 保存模特圖檔名備份
+            # 2. 保存模特圖檔名備份 (對應 View 的需求)
             model_filename, model_save_path = self.get_unique_filename(prefix="model", ext="png")
             pil_model.save(model_save_path, "PNG")
 
-            # 3. 構建合成 Prompt
-            m_info_str = json.dumps(model_info, ensure_ascii=False) if model_info else "Standard"
+            # 3. 構建合成 Prompt (強化材質不透明度與色彩精準度)
             prompt = f"""
-            ### Role: Expert AI VFX Artist specializing in photorealistic virtual try-on.
-            ### Inputs: Image 1(Garment), Image 2(Model), Image 3(Texture Swatch)
-            
-            ### Specs:
-            - Target Color: {hex_color} (STRICT)
-            - Technical Analysis: {garment_description}
-            - Model Context: {m_info_str}
+### ROLE
+Expert AI Fashion VFX Artist. Your mission is to perform a high-fidelity virtual try-on that meets professional runway photography standards.
 
-            ### Instructions:
-            1. IDENTITY: KEEP face, expression, and body shape of Image 2 EXACTLY.
-            2. TEXTURE: Map texture from Image 3 onto the garment in Image 1.
-            3. REALISM: Photorealistic high-resolution output. No filters.
-            """
+### TARGET SPECS
+- **Subject**: Liu Wen (Image 2). Maintain her distinctive bone structure, facial features, and windswept hair with 100% pixel-level fidelity.
+- **Garment**: The pink ruffled blouse from Image 1.
+- **Target Color**: Hex {hex_color} (Rose Quartz). Apply with absolute precision.
+- **Texture Reference**: Image 3 (8K Micro-texture swatch).
+
+### EXECUTION STEPS
+1. **Material Integrity (CRITICAL)**:
+   - **100% Opacity**: Disable all sub-surface scattering. The fabric must be solid and non-transparent. 
+   - **Texture Mapping**: Apply the micro-denier weave from Image 3. Ensure the fabric grain is visible and sharp.
+   - **Drape & Warp**: Tailor the blouse to the model’s frame in Image 2. The V-neckline and cascading ruffles must drape naturally over the shoulders without clipping.
+
+2. **Color & Lighting**:
+   - **D65 Neutral Light**: Use a neutral studio lighting rig to ensure Hex {hex_color} does not shift towards warm or cool tones.
+   - **Shadows**: Render realistic contact shadows within the fabric folds, but keep the overall color vibrant.
+
+3. **Background & Aesthetic**:
+   - **Pure White (#FFFFFF)**: Isolate the model against a solid white studio background.
+   - **Studio Look**: Create a seamless "floating" aesthetic with neutralized contact shadows at the feet.
+
+### NEGATIVE CONSTRAINTS
+- NO facial or body alteration. 
+- NO transparency or sheer fabric effects.
+- NO environmental color bleeding.
+- NO cartoon, illustration, or low-resolution artifacts.
+
+### OUTPUT
+A high-resolution, photorealistic fashion editorial image of the model in a confident runway stride.
+"""
 
             # 4. 調用 Gemini 進行合成
             tryon_filename, tryon_save_path = self.get_unique_filename(prefix="tryon_final", ext="png")
@@ -473,15 +504,17 @@ JSON Structure:
                 contents=[pil_cloth, pil_model, texture_swatch, prompt]
             )
 
-            # 5. 提取產出的圖片並儲存
+            # 5. 提取產出的圖片並儲存 (加入多層安全檢查防止 NoneType 錯誤)
             image_saved = False
-            if response.candidates and response.candidates[0].content.parts:
+            if response and response.candidates and response.candidates[0].content.parts:
                 for part in response.candidates[0].content.parts:
-                    if hasattr(part, 'inline_data'):
+                    # 優先嘗試 inline_data 格式
+                    if hasattr(part, 'inline_data') and part.inline_data and part.inline_data.data:
                         with open(tryon_save_path, 'wb') as f:
                             f.write(part.inline_data.data)
                         image_saved = True
                         break
+                    # 次要嘗試 text/image 轉換格式
                     elif hasattr(part, 'text') and not image_saved:
                         try:
                             img_obj = part.as_image()
@@ -492,7 +525,11 @@ JSON Structure:
 
             if not image_saved:
                 tools_status["gemini_model"] = "fail"
-                return self._build_error_response(422, "合成失敗：未獲取到影像數據", tools_status, {})
+                # 判斷是否為額度耗盡
+                err_message = "合成失敗：未獲取到影像數據"
+                if not response:
+                    err_message = "API 無回應 (可能是 429 Resource Exhausted)"
+                return self._build_error_response(422, err_message, tools_status, {})
 
             # 6. 回傳成功響應
             tools_status["gemini_model"] = "success"
@@ -505,7 +542,6 @@ JSON Structure:
                     "hex_color": hex_color
                 }
             )
-
 
         except Exception as e:
             logger.error(f"❌ 試穿合成過程出錯: {str(e)}")

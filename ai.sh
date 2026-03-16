@@ -101,8 +101,8 @@ docker run -d \
   --env-file .env \
   -v "$(pwd)/ai_app:/app/ai_app" \
   -v "$(pwd)/densepose_assets:/app/densepose_assets" \
+  -v "$(pwd)/media:/app/media" \
   "${APP_IMAGE}"
-
 # 8) 完成提示
 echo "-------------------------------------------------------"
 echo "🎉 容器啟動成功"
