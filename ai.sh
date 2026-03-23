@@ -54,22 +54,22 @@ fi
 
 echo "✅ RUN_PORT / GOOGLE_API_KEY 檢查通過"
 
-# 3) DensePose 設定檢查
-if [ "${ENABLE_DENSEPOSE:-false}" = "true" ]; then
-  if [ ! -f "${LOCAL_DENSEPOSE_WEIGHTS}" ]; then
-    echo "❌ 錯誤：找不到 DensePose 權重檔"
-    echo "   預期位置：${LOCAL_DENSEPOSE_WEIGHTS}"
-    exit 1
-  fi
+# # 3) DensePose 設定檢查
+# if [ "${ENABLE_DENSEPOSE:-false}" = "true" ]; then
+#   if [ ! -f "${LOCAL_DENSEPOSE_WEIGHTS}" ]; then
+#     echo "❌ 錯誤：找不到 DensePose 權重檔"
+#     echo "   預期位置：${LOCAL_DENSEPOSE_WEIGHTS}"
+#     exit 1
+#   fi
 
-  if [ "$(stat -c%s "${LOCAL_DENSEPOSE_WEIGHTS}")" -lt 10000000 ]; then
-    echo "❌ 錯誤：DensePose 權重檔太小，可能不是有效模型"
-    echo "   檔案：${LOCAL_DENSEPOSE_WEIGHTS}"
-    exit 1
-  fi
+#   if [ "$(stat -c%s "${LOCAL_DENSEPOSE_WEIGHTS}")" -lt 10000000 ]; then
+#     echo "❌ 錯誤：DensePose 權重檔太小，可能不是有效模型"
+#     echo "   檔案：${LOCAL_DENSEPOSE_WEIGHTS}"
+#     exit 1
+#   fi
 
-  echo "✅ DensePose 權重檢查通過"
-fi
+#   echo "✅ DensePose 權重檢查通過"
+# fi
 
 # 4) Docker 檢查
 if ! command -v docker >/dev/null 2>&1; then
@@ -100,9 +100,13 @@ docker run -d \
   -p "${RUN_PORT}:${APP_PORT_IN_CONTAINER}" \
   --env-file .env \
   -v "$(pwd)/ai_app:/app/ai_app" \
-  -v "$(pwd)/densepose_assets:/app/densepose_assets" \
   -v "$(pwd)/media:/app/media" \
   "${APP_IMAGE}"
+  # -v "$(pwd)/densepose_assets:/app/densepose_assets" \
+
+
+
+
 # 8) 完成提示
 echo "-------------------------------------------------------"
 echo "🎉 容器啟動成功"
@@ -110,3 +114,4 @@ echo "🔗 服務位址：http://localhost:${RUN_PORT}"
 echo "📊 查看日誌：docker logs -f ${CONTAINER_NAME}"
 echo "🛑 停止容器：docker stop ${CONTAINER_NAME}"
 echo "-------------------------------------------------------"
+
