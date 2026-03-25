@@ -167,104 +167,87 @@ class RemoveBgView(View):
 class TryCombineView(View):
     def post(self, request, *args, **kwargs):
         # ========== 1. 接收文件與額外 JSON 資料 ==========
+        # 這裡直接拿到的就是 API 傳入的原始文件
         model_image = request.FILES.get('model_image')
         garment_image = request.FILES.get('clothes_image')
 
         try:
-            # 解析附帶在請求中的 data 字串 (通常包含模特兒身高體重等額外資訊)
             data_str = request.POST.get('data')
             data = json.loads(data_str) if data_str else {}
         except json.JSONDecodeError:
             data = {}
 
-        # ========== 2. 基礎驗證：確認雙方圖片都有收到 ==========
+        # ========== 2. 基礎驗證 ==========
         if not model_image or not garment_image:
             logger.warning("⚠️ [TryOn] 缺少圖片")
             return JsonResponse({
                 "code": 400,
                 "message": "Bad Request: 缺少必要圖片",
                 "tools_status": {
-                    "rembg_people": "skipped", # 試穿流程目前不重複去背，直接進行合成
+                    "rembg_people": "skipped", 
+                    "densepose_analyzer": "skipped",
                     "opencv_smoothing": "not_started",
                     "gemini_consultant": "not_started",
                     "gemini_model": "not_started"
                 }
             }, status=400)
 
-        # 用於記錄需要清理的暫存檔案路徑清單
-        temp_files = []
-
         try:
             processor = AIProcessor()
-            logger.info("🔄 [TryOn] 啟動流水線控制 (跳過去背流程)...")
+            logger.info("🔄 [TryOn] 啟動流水線控制 (直接處理 Stream)...")
             
-            # 更新工具執行狀態
             tools_status = {
                 "rembg_people": "skipped",
+                "densepose_analyzer": "skipped",
                 "opencv_smoothing": "success", 
                 "gemini_consultant": "not_started", 
                 "gemini_model": "not_started"
             }
 
-            # --- 步驟 1: 將模特兒圖儲存為實體暫存檔，供後續合成引擎讀取 ---
-            tmp_m_name, tmp_m_path = processor.get_unique_filename(prefix="tmp_model", ext="png")
+            # 確保檔案指標在開頭
             if hasattr(model_image, 'seek'): model_image.seek(0)
-            with open(tmp_m_path, 'wb+') as dest:
-                for chunk in model_image.chunks():
-                    dest.write(chunk)
-            temp_files.append(tmp_m_path)
-
-            # --- 步驟 2: 將衣服素材儲存為實體暫存檔 ---
-            tmp_g_name, tmp_g_path = processor.get_unique_filename(prefix="tmp_garment", ext="png")
             if hasattr(garment_image, 'seek'): garment_image.seek(0)
-            with open(tmp_g_path, 'wb+') as dest:
-                for chunk in garment_image.chunks():
-                    dest.write(chunk)
-            temp_files.append(tmp_g_path)
-            
-            # 開啟衣服圖片進行特徵分析 (顏色與材質)
-            pil_cloth = Image.open(tmp_g_path).convert("RGBA")
 
-            # --- 步驟 3: 視覺特徵提取 (由 AIProcessor 計算主色與材質採樣) ---
+            # --- 步驟 3 & 4: 視覺特徵與 Gemini 分析 ---
+            # 直接用 Image.open 讀取 UploadedFile 物件
+            pil_cloth = Image.open(garment_image).convert("RGBA")
             hex_color = processor._get_dominant_color(pil_cloth)
             texture_swatch = processor._create_texture_swatch(pil_cloth)
             
-            # --- 步驟 4: 調用 Gemini 獲取服裝的技術規格描述 (Digital Twin) ---
             tools_status["gemini_consultant"] = "running"
             analysis_res = processor.analyze_garment(pil_cloth)
-            garment_description = analysis_res.get('description')
-            tools_status["gemini_consultant"] = analysis_res.get('gemini_consultant', "success")
+            garment_description = analysis_res.get('description', '')
+            tools_status["gemini_consultant"] = "success"
 
-            # --- 步驟 5: 執行最後的 VFX 合成 (呼叫 Nano-Banana 模型) ---
+            # --- 步驟 5: 執行最後的 VFX 合成 ---
             tools_status["gemini_model"] = "running"
             
-            with open(tmp_m_path, 'rb') as final_m_file:
-                result_tryon = processor.virtual_try_on(
-                    model_image=final_m_file,
-                    clean_clothes_path=tmp_g_path,
-                    hex_color=hex_color,
-                    texture_swatch=texture_swatch,
-                    garment_description=garment_description,
-                    model_info=data.get('model_info', {}),
-                    garment_info=data.get('garment_info', {})
-                )
+            # 直接傳入原始的 model_image 與 garment_image 物件
+            result_tryon = processor.virtual_try_on(
+                model_image=model_image,        # 直接傳入文件物件
+                garment_image=garment_image,    # 直接傳入文件物件
+                hex_color=hex_color,
+                texture_swatch=texture_swatch,
+                garment_description=garment_description,
+                model_info=data.get('model_info', {}),
+                garment_info=data.get('garment_info', {})
+            )
             
-            # 合成失敗時的回傳
             if not result_tryon.get('success'):
                 return JsonResponse(result_tryon, status=result_tryon.get('code', 422))
             
-            # 合成成功，獲取最終產出的圖片路徑
             tools_status["gemini_model"] = "success"
             tryon_filename = result_tryon.get('tryon_result_filename')
             tryon_path = os.path.join(settings.MEDIA_ROOT, tryon_filename)
 
-            # ========== 3. 構建 Multipart/Mixed 響應回傳給前端 ==========
+            # ========== 3. 構建響應 ==========
             analysis_data = {
                 "code": 200,
                 "message": "Success",
                 "tools_status": tools_status,
                 "data": {
                     "file_name": tryon_filename,
+                    "densepose_file": None,
                     "file_format": "PNG"
                 }
             }
@@ -272,13 +255,13 @@ class TryCombineView(View):
             boundary = 'frame_boundary'
             response_body = []
             
-            # Part 1: 回傳 JSON 資訊
+            # Part 1: JSON
             response_body.append(f'--{boundary}\r\n'.encode('utf-8'))
             response_body.append(b'Content-Type: application/json\r\n\r\n')
             response_body.append(json.dumps(analysis_data, indent=2, ensure_ascii=False).encode('utf-8'))
             response_body.append(b'\r\n')
             
-            # Part 2: 回傳最終合成結果的圖片二進位數據
+            # Part 2: Image
             response_body.append(f'--{boundary}\r\n'.encode('utf-8'))
             response_body.append(b'Content-Type: image/png\r\n')
             response_body.append(f'Content-Disposition: attachment; filename="{tryon_filename}"\r\n\r\n'.encode('utf-8'))
@@ -288,21 +271,13 @@ class TryCombineView(View):
             
             response_body.append(f'--{boundary}--\r\n'.encode('utf-8'))
             
-            # --- 最終清理：刪除所有處理過程產生的中間暫存檔 (只留結果檔) ---
-            for f_path in temp_files:
-                if os.path.exists(f_path):
-                    os.remove(f_path)
-            
-            logger.info(f"✅ [TryOn] 合成完成。中間檔已清理: {tryon_filename}")
+            logger.info(f"✅ [TryOn] 合成完成 (Stream 模式)。")
             return HttpResponse(
                 b''.join(response_body), 
                 content_type=f'multipart/mixed; boundary={boundary}'
             )
 
         except Exception as e:
-            # 異常發生時也要確保清理暫存檔
-            for f_path in temp_files:
-                if os.path.exists(f_path): os.remove(f_path)
             logger.error(f"❌ [TryOn] 系統錯誤: {str(e)}")
             import traceback
             logger.error(traceback.format_exc())
