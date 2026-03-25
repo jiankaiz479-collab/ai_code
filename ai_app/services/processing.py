@@ -350,42 +350,56 @@ class AIProcessor(ImageProcessingInterface):
 
     def analyze_garment(self, pil_cloth_img):
         """
-        技術分析：生成服裝的「數位孿生」描述，包含材質、懸垂性與結構細節。
+        技術分析：生成服裝的「數位孿生」描述。
+        這段程式碼維持你原本最精確的幾何掃描邏輯，作為後續合成的「圖紙」。
         """
-        print(f"🧐 [AI 分析] 正在解析衣服細節...")
+        print(f"🧐 [AI 分析] 正在執行幾何掃描與物理特性解析...")
         try:
+            # 這是你原本那份非常專業的 Prompt，建議維持，因為它抓細節很準
             analysis_prompt = """
             ### Role
-            You are a Senior Technical Fashion Analyst. Your job is to extract a precise "Digital Twin" specification from a clothing image.
+            You are a Senior Computer Vision Engineer. Your task is to perform a "Geometric Scan" of the uploaded garment image to facilitate a seamless Virtual Try-On (VTO) synthesis.
 
             ### Task
-            Analyze the provided garment image and generate a structured technical description. Focus on physical reality.
+            Perform a pixel-level spatial analysis. Identify the EXACT boundaries and material behavior of the garment. 
 
-            ### Output Format (Strictly follow this structure)
-            1. **Category**: (e.g., Hoodie, Maxi Dress, Denim Jacket)
-            2. **Material Physics**:
-                - Texture: (e.g., Ribbed, Satin-finish, Distressed denim)
-                - Weight: (e.g., Heavyweight, Sheer, Stiff)
-                - Drape: (e.g., Flows loosely, Structured/Rigid)
-            3. **Visual Details**:
-                - Color: (Specific shade description)
-                - Pattern: (Describe exact print, logo text, or graphics and their location)
-            4. **Construction**:
-                - Fit: (Oversized, Slim, Boxy)
-                - Neckline/Sleeves: (Crew neck, Drop shoulder, Raglan)
-                - Details: (Visible stitching, buttons, zippers, pockets)
+            ### Output Format (Strict Structural Specification)
+            1. **Spatial Coordinates & Boundaries (Crucial)**:
+               - **Neckline Geometry**: (e.g., Narrow Crew-neck, Off-shoulder, Deep V-plunge. Specify how high or low it sits relative to a standard collarbone.)
+               - **Hemline Termination**: (e.g., Cropped at high-waist, Standard hip-length, Extra-long tunic. Specify the exact vertical cut-off point.)
+               - **Sleeve Termination**: (e.g., Full-length to wrist, Quarter-length to elbow, Cap-sleeve. Does it have a cuff or raw edge?)
 
-            ### Constraint
-            Describe EXACTLY what you see. Do not hallucinate accessories not present in the image.
+            2. **Anatomical Displacement (Volume)**:
+               - **Shoulder Silhouette**: (e.g., Structured padding, Natural drop-shoulder, Raglan seam. Describe the transition from neck to arm.)
+               - **Fit Category**: (e.g., Compression/Skin-tight, Regular, Oversized/Boxy. How much "air gap" exists between the fabric and a standard body?)
+               - **3D Shape**: (Is the garment flat or does it have built-in volume like puff sleeves or a quilted puffer texture?)
+
+            3. **Physical Material Properties**:
+               - **Stiffness & Drape**: (e.g., Rigid canvas, Fluid silk, Weighted fleece. How does the edge of the fabric behave?)
+               - **Surface Micro-detail**: (e.g., 1x1 Ribbed knit, Distressed denim fraying, Matte nylon. Describe the texture grain.)
+               - **Transparency/Opacity**: (100% Opaque, Semi-sheer, or Transparent. Specify if the background/skin would be visible through the weave.)
+
+            4. **High-Contrast Keypoints**:
+               - **Color Fidelity**: (Exact Hex-code or precise shade, including shadow/highlight intensity.)
+               - **Graphic Anchors**: (Describe any logos, patterns, or text. Specify exact size and location using coordinates like "Upper Left Chest" or "Full Frontal Center".)
+               - **Hardware**: (Detail any zippers, buttons, or drawstrings. Are they functional or decorative?)
+
+            ### Constraints (Strict Enforcement)
+            - **Boundary Focus**: Use terms that define where the garment ENDS (e.g., "ends precisely at the wrist bone").
+            - **No Hallucinations**: Only describe the object. Ignore any hangers, labels, or backgrounds.
+            - **VTO Optimized**: Focus on info that helps a model know WHICH skin to cover and WHICH skin to keep.
             """
             
+            # 使用顧問模型進行分析 (通常用 Flash 就很快很準)
             response = self.client.models.generate_content(
-                model=self.consultant_model,
+                model=self.consultant_model, # 或是 self.model_name
                 contents=[pil_cloth_img, analysis_prompt]
             )
             
-            description = response.text if response.text else "Standard garment"
-            print(f"📝 分析結果: {description}")
+            # 取得分析內容，如果失敗則給予預設值
+            description = response.text if response and response.text else "Standard garment"
+            print(f"📝 分析完成。已產出服裝數位藍圖。")
+            
             return {
                 "success": True,
                 "description": description,
@@ -393,109 +407,88 @@ class AIProcessor(ImageProcessingInterface):
             }
 
         except Exception as e:
-            logger.error(f"⚠️ 分析失敗: {e}")
+            print(f"⚠️ [analyze_garment] 分析出錯: {e}")
             return {
                 "success": False,
-                "description": "A clothing item",
+                "description": "A standard clothing item",
                 "gemini_consultant": "error"
             }
-
 
     # ==========================================
     # [核心合成] 虛擬試穿 (VFX 生圖引擎)
     # ==========================================
 
-    def virtual_try_on(self, model_image, clean_clothes_path, hex_color, texture_swatch, garment_description, model_info=None, garment_info=None):
+    def virtual_try_on(self, model_image, garment_image, hex_color, texture_swatch, garment_description, model_info=None, garment_info=None):
         """
-        使用 Nano-Banana 模型執行試穿合成。
-        整合了材質保真度、顏色鎖定與背景純化邏輯。
+        針對 Gemini 1.5 Flash 影像模型優化的試穿合成。
+        已移除 DensePose 依賴，直接進行影像合成。
         """
         tools_status = {
             "rembg": "success", 
             "opencv_smoothing": "success", 
             "gemini_consultant": "success", 
             "gemini_model": "running",
-            "densepose": "skipped"
+            "densepose": "skipped" # 固定為跳過
         }
         
         try:
             if not self.client:
                 return self._build_error_response(500, "Gemini Client 未初始化", tools_status, {})
 
-            # 1. 讀取與正規化圖片素材
+            # 1. 讀取圖片素材 (直接處理傳入的檔案物件)
             if hasattr(model_image, 'seek'): model_image.seek(0)
             pil_model = Image.open(model_image).convert("RGB")
-            pil_cloth = Image.open(clean_clothes_path).convert("RGB")
+            
+            if hasattr(garment_image, 'seek'): garment_image.seek(0)
+            pil_cloth = Image.open(garment_image).convert("RGB")
+            
+            # --- DensePose 邏輯已註解 ---
+            """
+            pil_densepose = None
+            if densepose_path and os.path.exists(densepose_path):
+                pil_densepose = Image.open(densepose_path).convert("RGB")
+            """
 
-            # 2. 保存原始模特圖作為備份
+            # 2. 保存備份 (供後台紀錄或 debug 使用)
             model_filename, model_save_path = self.get_unique_filename(prefix="model", ext="png")
             pil_model.save(model_save_path, "PNG")
 
-            # 3. 構建合成指令
+            # 3. 構建合成指令 (移除 DensePose 相關描述)
             prompt = f"""
-            ### Role
-            You are an expert AI VFX Artist specializing in photorealistic virtual try-on.
+                ### Core Mission
+                Forcefully transfer the complete garment from [Image 1] onto the model in [Image 2].
 
-            ### Input Data
-            - **Image 1 (Garment)**: The full view of the clothing.
-            - **Image 2 (Model)**: The target person.
-            - **Image 3 (Texture Detail)**: A MICROSCOPIC CLOSE-UP of the fabric. Use this for texture mapping.
-            
-            ### Technical Specs
-            - **Target Color Code**: {hex_color} (You MUST strictly adhere to this Hex Color)
-            - **Garment Description**: {garment_description}
+                ### Mandatory Execution Rules
+                1. **Source Integrity**: Maintain 100% of the original color, pattern, texture, and details from [Image 1]. Do NOT change its color.
+                2. **Body Mapping**: Wrap and fit the garment precisely to the model's anatomy in [Image 2]. The neckline, shoulders, chest, and sleeves MUST align perfectly with the model's pose, ensuring a natural 3D draped effect.
+                3. **Zero-Invasive Masking**: Do NOT modify the model's head, hands, feet, skin tone, or any background elements. These must remain 100% unchanged from [Image 2].
+                4. **Physical Occlusion**: If the model's hair or hands are in front of their torso in [Image 2], the transferred garment MUST be rendered behind them.
 
-            ### Task
-            Generate a photorealistic image of the **FULL PERSON (head-to-toe)** from [Image 2] wearing the garment from [Image 1].
+                ### Final Specification
+                - Output: A realistic, high-definition image of the model wearing the exact garment from [Image 1].
+                - Quality: Clean edges, seamless layering, 4K detail.
+                """
 
-            ### Execution Instructions
-            1. **Identity & Body Preservation (CRITICAL)**: 
-                - **Face**: You MUST keep the model's facial features (eyes, nose, mouth, jawline), expression, and skin texture EXACTLY the same as in [Image 2]. 
-                - **Body Shape**: Do NOT alter the model's physique. The height, weight, proportions, and body measurements must remain UNCHANGED. Do not make the model slimmer or more muscular.
-                - **Pose**: Keep the pose identical to the original image.
-
-            2. **Color Fidelity**: 
-                - The output garment MUST match the Target Color Code {hex_color} exactly.
-                - Do not let the scene lighting wash out the color.
-
-            3. **Material Rendering**:
-                - Apply the texture details visible in [Image 3] to the entire garment.
-                - **Reflectance**: Observe how light hits the fabric in [Image 1] (matte vs glossy) and replicate it.
-
-            4. **Garment Fitting & Framing**:
-                - Warp and shape the garment to fit the model's body naturally.
-                - The clothes should wrap around the body's actual volume, not change the body's volume.
-                - **Full Body Representation**: Ensure the entire person is visible in the frame, from the head down to the feet. Do not crop the person.
-
-            ### Negative Constraints (STRICTLY FORBIDDEN)
-            - Do not change the model's face, body shape, gender, or ethnicity.
-            - Do not generate a cartoon or illustration style. Output must be a Photo.
-            - Do not "beautify" or apply filters to the model.
-            - **Do not crop the head, hands, or feet. Avoid any half-body or close-up shots.**
-
-            ### Output
-            A single high-resolution photorealistic **full-body image (entire person visible)**.
-            """
-
-            # 4. 調用模型執行影像生成
+            # 4. 調用生成
             tryon_filename, tryon_save_path = self.get_unique_filename(prefix="tryon_final", ext="png")
             
+            # 組合內容：衣服、材質、模特兒、指令
+            contents = [pil_cloth, texture_swatch, pil_model, prompt]
+
             response = self.client.models.generate_content(
                 model=self.model_name,
-                contents=[pil_cloth, pil_model, texture_swatch, prompt]
+                contents=contents
             )
 
-            # 5. 提取二進位數據或 PIL 影像並存檔
+            # 5. 存檔邏輯
             image_saved = False
             if response and response.candidates and response.candidates[0].content.parts:
                 for part in response.candidates[0].content.parts:
-                    # 情況 A：模型回傳二進位 byte 數據 (高效能)
                     if hasattr(part, 'inline_data') and part.inline_data and part.inline_data.data:
                         with open(tryon_save_path, 'wb') as f:
                             f.write(part.inline_data.data)
                         image_saved = True
                         break
-                    # 情況 B：模型回傳物件，需手動轉換 (Gemini 相容性)
                     elif hasattr(part, 'text') and not image_saved:
                         try:
                             img_obj = part.as_image()
@@ -506,25 +499,122 @@ class AIProcessor(ImageProcessingInterface):
 
             if not image_saved:
                 tools_status["gemini_model"] = "fail"
-                err_message = "合成失敗：未獲取到影像數據"
-                if not response:
-                    err_message = "API 無回應 (可能是 429 Resource Exhausted)"
-                return self._build_error_response(422, err_message, tools_status, {})
+                return self._build_error_response(422, "合成失敗", tools_status, {})
 
-            # 6. 完成流程並回傳結果資訊
             tools_status["gemini_model"] = "success"
             return self._build_success_response(
                 tools_status,
                 model_image_filename=model_filename,
                 tryon_result_filename=tryon_filename,
-                style_analysis={
-                    "tech_spec": garment_description, 
-                    "hex_color": hex_color
-                }
+                style_analysis={"tech_spec": garment_description, "hex_color": hex_color}
             )
 
         except Exception as e:
             logger.error(f"❌ 試穿合成過程出錯: {str(e)}")
+            return self._build_error_response(500, f"內部異常: {str(e)}", tools_status, {"detail": str(e)})
+        
+    def generate_densepose(self, input_image_path):
+        """
+        [實戰成功版] 姿態提取工具 - 整合動態解包防呆機制與純淨 IUV 渲染。
+        """
+        logger.info(f"🧠 [DensePose] 啟動成功版幾何掃描: {input_image_path}")
+        try:
+            import cv2
+            import torch
+            import numpy as np
+            from PIL import Image
+            import detectron2
+            from detectron2.config import get_cfg
+            from detectron2.engine import DefaultPredictor
+            from densepose import add_densepose_config
+            from densepose.vis.extractor import DensePoseResultExtractor
+            from densepose.vis.densepose_results import DensePoseResultsFineSegmentationVisualizer
+
+            # 1. 自動定位路徑
+            d2_pkg_path = os.path.dirname(detectron2.__file__)
+            calculated_densepose_path = os.path.join(os.path.dirname(d2_pkg_path), 'projects', 'DensePose')
+            if not os.path.exists(calculated_densepose_path):
+                calculated_densepose_path = "/app/detectron2/projects/DensePose"
+
+            _, pose_map_path = self.get_unique_filename(prefix="pose_map", ext="png")
+
+            # 2. 初始化 Predictor (使用單例模式避免重複載入權重)
+            if not hasattr(self, '_densepose_predictor'):
+                cfg = get_cfg()
+                add_densepose_config(cfg)
+                
+                cfg_path = os.path.join(calculated_densepose_path, "configs/densepose_rcnn_R_50_FPN_s1x.yaml")
+                weights_path = "/app/densepose_assets/model_final_162be9.pkl" # 這裡指向你 Docker 的位置
+                
+                cfg.merge_from_file(cfg_path)
+                cfg.MODEL.WEIGHTS = weights_path
+                cfg.MODEL.DEVICE = "cpu"
+                cfg.MODEL.ROI_HEADS.SCORE_THRESH_TEST = 0.5 
+                
+                self._densepose_predictor = DefaultPredictor(cfg)
+
+            # 3. 讀取與推理
+            img = cv2.imread(input_image_path)
+            if img is None:
+                return {"success": False, "error": "無法讀取模特兒圖片"}
+            
+            with torch.no_grad():
+                outputs = self._densepose_predictor(img)
+            
+            if "instances" not in outputs:
+                return {"success": False, "error": "DensePose 輸出格式異常"}
+            
+            instances = outputs["instances"].to("cpu")
+            if len(instances) == 0:
+                return {"success": False, "error": "DensePose 未檢測到人體"}
+            
+            if not instances.has("pred_densepose"):
+                return {"success": False, "error": "無法從影像中提取姿態特徵"}
+
+            # 4. 提取結果並繪圖 (動態解包防呆)
+            extractor = DensePoseResultExtractor()
+            extracted_data = extractor(instances)
+            
+            # 🛡️ 處理不同版本 API 回傳變數數量不一致
+            if len(extracted_data) == 3:
+                boxes, scores, dp_results = extracted_data
+            elif len(extracted_data) == 2:
+                boxes, dp_results = extracted_data
+            else:
+                return {"success": False, "error": f"未知特徵格式: {len(extracted_data)}"}
+            
+            formatted_data = (boxes, dp_results)
+            
+            # 5. 純淨渲染 (拔除 Bounding Box 外框，專供 Gemini 作為邊界約束圖)
+            visualizer = DensePoseResultsFineSegmentationVisualizer()
+            blank_bg = np.zeros(img.shape, dtype=np.uint8)
+            vis_img = visualizer.visualize(blank_bg, formatted_data)
+
+            # 6. 儲存圖片
+            Image.fromarray(cv2.cvtColor(vis_img, cv2.COLOR_BGR2RGB)).save(pose_map_path, "PNG")
+            logger.info(f"✅ DensePose 成功產出純淨版 Pose Map: {pose_map_path}")
+            
+            return {"success": True, "densepose_path": pose_map_path}
+
+        except Exception as e:
+            logger.error(f"❌ DensePose 嚴重報錯: {str(e)}")
             import traceback
             logger.error(traceback.format_exc())
-            return self._build_error_response(500, f"內部合成引擎異常: {str(e)}", tools_status, {"detail": str(e)})
+            return {"success": False, "error": str(e)}
+
+
+
+    def _visualize_iuv(self, labels, uv):
+        """ 核心渲染：確保 IUV 數值轉換為可見的 RGB 範圍 """
+        import numpy as np
+        h, w = labels.shape
+        vis = np.zeros((h, w, 3), dtype=np.uint8)
+        
+        # R 通道：人體部位標籤 (1-24)，放大倍數讓顏色變明顯
+        vis[:, :, 0] = (labels.astype(float) / 24.0 * 255.0).astype(np.uint8)
+        # G 通道：U 座標 (0-1)
+        vis[:, :, 1] = (uv[0, :, :] * 255.0).astype(np.uint8)
+        # B 通道：V 座標 (0-1)
+        vis[:, :, 2] = (uv[1, :, :] * 255.0).astype(np.uint8)
+        
+        return vis

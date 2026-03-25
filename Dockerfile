@@ -31,12 +31,12 @@ RUN pip install --no-cache-dir --upgrade pip setuptools wheel && \
       --index-url https://download.pytorch.org/whl/cpu
 
 # [暫時註解] Install detectron2 and DensePose from official source
-# RUN git clone --depth 1 https://github.com/facebookresearch/detectron2.git /app/detectron2 && \
-#     pip install --no-cache-dir -e /app/detectron2 --no-build-isolation && \
-#     pip install --no-cache-dir -e /app/detectron2/projects/DensePose --no-build-isolation
+RUN git clone --depth 1 https://github.com/facebookresearch/detectron2.git /app/detectron2 && \
+    pip install --no-cache-dir -e /app/detectron2 --no-build-isolation && \
+    pip install --no-cache-dir -e /app/detectron2/projects/DensePose --no-build-isolation
 
 # [暫時註解] Verify DensePose
-# RUN python -c "import os; import detectron2; from densepose import add_densepose_config; cfg='/app/detectron2/projects/DensePose/configs/densepose_rcnn_R_50_FPN_s1x.yaml'; assert os.path.exists(cfg), cfg; print('detectron2+densepose ok')"
+RUN python -c "import os; import detectron2; from densepose import add_densepose_config; cfg='/app/detectron2/projects/DensePose/configs/densepose_rcnn_R_50_FPN_s1x.yaml'; assert os.path.exists(cfg), cfg; print('detectron2+densepose ok')"
 
 # App dependencies (現在包含所有 DensePose 的 Python 工具)
 COPY requirements.txt .
@@ -44,11 +44,6 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 # DensePose weights directory
 RUN mkdir -p /app/densepose_assets
-
-# [暫時註解] Try downloading DensePose weights during build
-# RUN python - <<'PY' || true
-# ... (中間那段下載 Code 內容不變，僅整段註解)
-# PY
 
 # App source
 COPY . .
