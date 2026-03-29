@@ -332,7 +332,7 @@ class AIProcessor(ImageProcessingInterface):
         has_bottom = False
         info_list = user_data.get('garments', [])
 
-        # 虛擬繪畫工程師專業掃描 Prompt (強化版)
+        # 虛擬繪畫工程師專業掃描 Prompt
         analysis_prompt = """
         ### Role: Senior Computer Vision & VFX Engineer. 
         ### Task: Perform a "Geometric Scan" of the uploaded garment image.
@@ -353,22 +353,29 @@ class AIProcessor(ImageProcessingInterface):
         - VTO Optimized: Focus on info that helps a model know WHICH skin to cover and WHICH skin to keep.
         """
 
-        for i, f in enumerate(garment_files):
-            pil_img = Image.open(f).convert("RGB") # 轉 RGB 供分析
-            category = info_list[i].get('clothes_category', 'others')
 
-            # --- [AI 掃描點] 按照你要求的 config 格式 ---
-            response = self.client.models.generate_content(
-                model=self.consultant_model,
-                contents=[pil_img, analysis_prompt],
-                config=types.GenerateContentConfig(
-                    response_mime_type="application/json",
-                    temperature=0.1
+        for i, f in enumerate(garment_files):
+            try:
+                pil_img = Image.open(f).convert("RGB")
+                category = info_list[i].get('clothes_category', 'others')
+                # --- [AI 掃描點] ---
+                response = self.client.models.generate_content(
+                    model=self.consultant_model,
+                    contents=[pil_img, analysis_prompt],
+                    config=types.GenerateContentConfig(
+                        response_mime_type="application/json",
+                        temperature=0.1
+                    )
                 )
-            )
-            
-            # 這份「物理掃描報告」現在包含了材質與透明度數據
-            scan_result = response.text 
+                scan_result = response.text 
+
+            except Exception as e:
+                # ❌ 這裡對齊狀態碼 2500
+                logger.error(f"❌ Step 3 分析失敗: {e}")
+                return {
+                    "error_code": 2500,
+                    "suggest": "AI Model (Analysis) service is currently unavailable. Please try again later."
+                }, "fail"
 
             if category in ['pants', 'skirt']:
                 has_bottom = True
@@ -377,27 +384,33 @@ class AIProcessor(ImageProcessingInterface):
                 "img": pil_img,
                 "cat": category,
                 "rule": info_list[i].get('garment_info', {}),
-                "scan_report": scan_result  # 儲存掃描報告，供 View 包裝或下一步使用
+                "scan_report": scan_result
             })
             
         return {"items": items, "has_bottom": has_bottom}, "success"
 
 
-    # --- [Step 5] 核心合成邏輯 (純邏輯，不存檔) ---
+    # ==========================================
+    # [Step 5] 核心合成邏輯 (純邏輯，不存檔)
+    # ==========================================
     def virtual_try_on(self, model_image, garments_ctx, user_data):
+        """
+        [Step 5] 核心合成邏輯：加入嚴格空值檢查，防止 NoneType 報錯。
+        """
         try:
             m_info = user_data.get('model_info', {})
             u_h = m_info.get('user_height', 170.0)
             u_w = m_info.get('user_waistline', 80.0)
 
-            # 建立衣服詳細數據字串 (用於填入 Prompt)
             garment_details = ""
             for i, item in enumerate(garments_ctx['items']):
                 rule = item['rule']
                 garment_details += f"- Item {i+1} ({item['cat']}): Sleeve {rule.get('clothes_arm_length', 0)}cm, Shoulder {rule.get('clothes_shoulder_width', 0)}cm. "
 
-            # 你要求的「虛擬繪畫工程師」單一 Prompt
+            # --- [2422 防禦開關] ---
             final_prompt = (
+                f"### CRITICAL RULE: BEFORE ANY SYNTHESIS, PERFORM A HUMAN PRESENCE CHECK ON THE model_image. "
+                f"IF the model_image contains ONLY A FLAT-LAID GARMENT, AN EMPTY HANGER, or NO VISIBLE HUMAN BODY, you MUST STOP and OUTPUT THE EXACT TEXT: 'ERROR: NO_HUMAN_DETECTED'. DO NOT PROCESS THE IMAGE. "
                 f"### ROLE: You are a Senior Virtual Fashion VFX Engineer. Your mission is precision garment synthesis and pixel-level painting. "
                 f"### GEOMETRIC SCAN PROTOCOL: Perform a spatial analysis of the garment. Identify EXACT boundaries: Neckline Geometry, Sleeve Termination, and Hemline Termination. "
                 f"Analyze Anatomical Displacement (Shoulder Silhouette/Fit Category) and Physical Material Properties (Stiffness/Drape/Surface Grain). "
@@ -410,44 +423,79 @@ class AIProcessor(ImageProcessingInterface):
                 f"### OUTPUT: A high-resolution, seamless, and photorealistic composite image."
             )
 
-            # 準備所有要傳給 AI 的圖片 (模特兒底圖 + 衣服圖清單)
             source_images = [item['img'] for item in garments_ctx['items']]
-
-            # 按照你要求的格式回傳 (將圖片與 Prompt 傳進去)
+            
             response = self.client.models.generate_content(
                 model=self.model_name,
                 contents=[model_image, *source_images, final_prompt]
             )
+            
+            # --- [關鍵修正：檢查 Response 是否有效] ---
+            if not response or not response.candidates:
+                logger.error("❌ Gemini 回傳空回應 (可能觸發安全過濾器)")
+                return {
+                    "error_code": 2422,
+                    "suggest": "Please use a clearer photo with a visible person. Content blocked by safety filters."
+                }, "fail"
+
+            # --- [AI 狀態攔截點] ---
+            # 增加安全檢查，防止 .text 在沒有內容時噴錯
+            try:
+                response_text = response.text
+                if "ERROR: NO_HUMAN_DETECTED" in response_text:
+                    logger.error("❌ Gemini 主動終止：model_image 偵測不到人體")
+                    return {
+                        "error_code": 2422,
+                        "suggest": "Please use a clearer photo with a visible person. The provided model_image is not valid."
+                    }, "fail"
+            except Exception:
+                # 如果連 .text 都拿不到，代表回應中可能只有圖片或根本沒東西
+                pass
+
             # 取得結果圖片物件
             try:
-                # 尋找回傳內容中屬於圖片的 Part
-                generated_image_part = next(part for part in response.candidates[0].content.parts if part.inline_data or part.blob)
-                image_bytes = generated_image_part.inline_data.data if generated_image_part.inline_data else generated_image_part.blob.data
+                # 確保 candidates[0].content.parts 存在
+                parts = response.candidates[0].content.parts
+                # 尋找含有圖片數據的 part
+                generated_part = next((part for part in parts if hasattr(part, 'inline_data') and part.inline_data or getattr(part, 'blob', None)), None)
+                
+                if not generated_part:
+                    raise ValueError("No image part found in response")
+
+                if hasattr(generated_part, 'inline_data') and generated_part.inline_data:
+                    image_bytes = generated_part.inline_data.data
+                else:
+                    image_bytes = generated_part.blob.data
+                
                 result_pil = Image.open(io.BytesIO(image_bytes))
-            except StopIteration:
-                logger.error("❌ Gemini 回傳內容中未找到圖片數據")
-                # 備援方案：回傳原圖或報錯
-                result_pil = model_image 
-            
+
+            except (StopIteration, Exception) as e:
+                logger.error(f"❌ 解析圖片數據失敗: {e}")
+                return {
+                    "error_code": 2422,
+                    "suggest": "Please use a clearer photo with a visible person. Our engine couldn't detect a human body to dress."
+                }, "fail"
+
             return {
                 "success": True, 
                 "result_image": result_pil, 
                 "status": "success"
-            }
+            }, "success"
 
         except Exception as e:
-            return {"success": False, "status": "fail", "message": str(e)}
-    
-    
-    
-    
-    
-    
-    
-    
-    
-    
-    
+            err_msg = str(e).lower()
+            logger.error(f"❌ Step 5 合成嚴重失敗: {e}")
+            
+            if any(word in err_msg for word in ["person", "human", "safety", "block", "finish_reason"]):
+                return {
+                    "error_code": 2422,
+                    "suggest": "Please use a clearer photo with a visible person."
+                }, "fail"
+            
+            return {
+                "error_code": 2501,
+                "suggest": f"AI Synthesis service abnormal: {str(e)}"
+            }, "fail"
     
     
     
