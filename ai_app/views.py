@@ -1,4 +1,5 @@
 import os
+import io
 import json
 import logging
 from PIL import Image, ImageEnhance
@@ -175,61 +176,95 @@ class TryCombineView(View):
             data = json.loads(data_str)
             garments_info = data.get('garments', [])
         except Exception as e:
-            return JsonResponse({"code": 400, "message": "JSON 格式錯誤"}, status=400)
+            # 2400: 缺少輸入參數或格式錯誤
+            return JsonResponse({
+                "code": 400,
+                "message": "2400",
+                "debug_info": {"suggest": "JSON 格式錯誤，請檢查傳入的 data 欄位。"}
+            }, status=400)
 
         # ========== 步驟 2: 指標重置與數量驗證 ==========
         if not model_image or not garment_images:
-            return JsonResponse({"code": 400, "message": "缺少必要圖片"}, status=400)
+            return JsonResponse({
+                "code": 400,
+                "message": "2400",
+                "debug_info": {"suggest": "缺少必要圖片檔案 (model_image 或 garment_images)。"}
+            }, status=400)
         
         if len(garment_images) != len(garments_info):
-            error_msg = f"數量不匹配: 圖片({len(garment_images)}) vs 資訊({len(garments_info)})"
-            return JsonResponse({"code": 400, "message": error_msg}, status=400)
+            return JsonResponse({
+                "code": 400,
+                "message": "2400",
+                "debug_info": {"suggest": f"圖片數量({len(garment_images)})與資訊數量({len(garments_info)})不匹配。"}
+            }, status=400)
 
         try:
             processor = AIProcessor()
             model_image.seek(0)
             for g in garment_images: g.seek(0)
 
-            # ========== 步驟 3: 款式分析 (View 呼叫 Processing 邏輯) ==========
-            garments_ctx, consult_status = processor.tool_garment_analysis(garment_images, data)
+            # ========== 步驟 3: 款式分析 ==========
+            # 若分析失敗通常歸類為 2500
+            try:
+                garments_ctx, consult_status = processor.tool_garment_analysis(garment_images, data)
+                # 關鍵修正：檢查 tool_garment_analysis 是否回傳失敗狀態
+                if consult_status == "fail":
+                    return JsonResponse({
+                        "code": 500,
+                        "message": "2500",
+                        "debug_info": {"suggest": garments_ctx.get('suggest', "AI 分析服務異常")}
+                    }, status=500)
+            except Exception as e:
+                return JsonResponse({
+                    "code": 500,
+                    "message": "2500",
+                    "debug_info": {"suggest": f"AI 分析服務異常: {str(e)}"}
+                }, status=500)
 
-            # ========== 步驟 4: 影像優化 (View 呼叫 Processing 邏輯) ==========
+            # ========== 步驟 4: 影像優化 ==========
+            from PIL import Image
             pil_raw = Image.open(model_image).convert("RGB")
 
-            # ========== 步驟 5: 核心合成 (純邏輯運算) ==========
-            # 注意：這裡只會拿回 PIL 影像物件，不包含存檔動作
-            result = processor.virtual_try_on(
+            # ========== 步驟 5: 核心合成 ==========
+            # 正確拆解 Tuple: (result 字典, status 字串)
+            result, status = processor.virtual_try_on(
                 model_image=pil_raw,
                 garments_ctx=garments_ctx,
                 user_data=data
             )
             
-            if not result.get('success'):
-                return JsonResponse({"code": 500, "message": result.get('message')}, status=500)
+            # 處理未偵測到人體 (2422) 或其他合成錯誤 (2501)
+            if status == "fail":
+                error_code = result.get('error_code', 2501)
+                suggest = result.get('suggest', "AI 合成引擎異常")
+                
+                return JsonResponse({
+                    "code": 422 if error_code == 2422 else 500,
+                    "message": str(error_code),
+                    "debug_info": {"suggest": suggest}
+                }, status=422 if error_code == 2422 else 500)
 
-            # ========== 步驟 6: 存檔與 Multipart 封裝 (View 執行 IO) ==========
-            # 1. 存檔邏輯
+            # ========== 步驟 6: 存檔與 Multipart 封裝 ==========
             final_image = result.get('result_image')
-            file_name = f"vto_{uuid.uuid4().hex}.png" # 現在 uuid 已定義
+            import uuid, os
+            from django.conf import settings
+            
+            file_name = f"try_on_outfit_{uuid.uuid4().hex[:8]}.png" 
             file_path = os.path.join(settings.MEDIA_ROOT, file_name)
             final_image.save(file_path, "PNG")
 
-            # 2. 整合狀態
-            tools_status = {
-                "rembg_people": "skipped",
-                "densepose_analyzer": "skipped",
-                "gemini_consultant": consult_status,
-                "gemini_model": result.get('status')
-            }
-
+            # 構建成功回覆的 JSON
             analysis_data = {
                 "code": 200,
-                "message": "Success",
-                "tools_status": tools_status,
-                "data": {"file_name": file_name, "file_format": "PNG"}
+                "message": "2200", 
+                "data": {
+                    "file_name": file_name,
+                    "file_format": "PNG",
+                    "items_processed": len(garment_images)
+                }
             }
 
-            # 3. 構建 Multipart/mixed 響應
+            # 構建 Multipart/mixed 響應
             boundary = 'frame_boundary'
             response_body = []
             response_body.append(f'--{boundary}\r\nContent-Type: application/json\r\n\r\n'.encode('utf-8'))
@@ -237,11 +272,19 @@ class TryCombineView(View):
             response_body.append(b'\r\n')
             response_body.append(f'--{boundary}\r\nContent-Type: image/png\r\n'.encode('utf-8'))
             response_body.append(f'Content-Disposition: attachment; filename="{file_name}"\r\n\r\n'.encode('utf-8'))
-            with open(file_path, 'rb') as f: response_body.append(f.read())
+            
+            with open(file_path, 'rb') as f: 
+                response_body.append(f.read())
+            
             response_body.append(b'\r\n')
             response_body.append(f'--{boundary}--\r\n'.encode('utf-8'))
             
             return HttpResponse(b''.join(response_body), content_type=f'multipart/mixed; boundary={boundary}')
 
         except Exception as e:
-            return JsonResponse({"code": 500, "message": str(e)}, status=500)
+            # 通用型系統錯誤 (對應 2501)
+            return JsonResponse({
+                "code": 500,
+                "message": "2501",
+                "debug_info": {"suggest": f"系統發生非預期錯誤: {str(e)}"}
+            }, status=500)
