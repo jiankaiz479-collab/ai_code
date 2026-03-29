@@ -267,108 +267,114 @@ class AIProcessor(ImageProcessingInterface):
     # ==========================================
     def virtual_try_on(self, model_image, garments_ctx, user_data):
         """
-        [Step 5] 核心合成邏輯：加入嚴格空值檢查，防止 NoneType 報錯。
+        [Step 5] 核心合成邏輯：AI 穿衣 -> 二次去背 -> 手動置中並預留底邊。
         """
         try:
             m_info = user_data.get('model_info', {})
             u_h = m_info.get('user_height', 170.0)
             u_w = m_info.get('user_waistline', 80.0)
 
-            garment_details = ""
-            for i, item in enumerate(garments_ctx['items']):
-                rule = item['rule']
-                garment_details += f"- Item {i+1} ({item['cat']}): Sleeve {rule.get('clothes_arm_length', 0)}cm, Shoulder {rule.get('clothes_shoulder_width', 0)}cm. "
-
-            # --- [2422 防禦開關] ---
+            # --- [1. 構建 Final Prompt: 強調邊緣對比與單一背景，利於後續去背] ---
             final_prompt = (
-                f"### CRITICAL RULE: BEFORE ANY SYNTHESIS, PERFORM A HUMAN PRESENCE CHECK ON THE model_image. "
-                f"IF the model_image contains ONLY A FLAT-LAID GARMENT, AN EMPTY HANGER, or NO VISIBLE HUMAN BODY, you MUST STOP and OUTPUT THE EXACT TEXT: 'ERROR: NO_HUMAN_DETECTED'. DO NOT PROCESS THE IMAGE. "
-                f"### ROLE: You are a Senior Virtual Fashion VFX Engineer. Your mission is precision garment synthesis and pixel-level painting. "
-                f"### GEOMETRIC SCAN PROTOCOL: Perform a spatial analysis of the garment. Identify EXACT boundaries: Neckline Geometry, Sleeve Termination, and Hemline Termination. "
-                f"Analyze Anatomical Displacement (Shoulder Silhouette/Fit Category) and Physical Material Properties (Stiffness/Drape/Surface Grain). "
+                f"### CRITICAL RULE 1: HUMAN PRESENCE CHECK. "
+                f"BEFORE ANY SYNTHESIS, verify that the model_image contains a legible HUMAN BODY. "
+                f"IF the model_image contains ONLY a flat garment, an empty hanger, or no visible person, "
+                f"STOP immediately and output the exact text: 'ERROR: NO_HUMAN_DETECTED'. DO NOT PROCESS. "
+
+                f"### ROLE: Senior Virtual Fashion VFX Engineer. Specializing in Garment Physics and Edge Precision. "
+
+                f"### GEOMETRIC SCAN PROTOCOL: Spatial analysis of garments. Identify: Neckline, Sleeves, Hemline. "
+                f"Analyze Anatomical Displacement and Material Properties (Stiffness/Drape/Grain). "
+
                 f"### MODEL DATA: Height {u_h}cm, Waistline Level {u_w}cm. "
+
                 f"### EXECUTION RULES: "
-                f"1. SELECTIVE PAINTING: ONLY modify pixels where garments are applied. KEEP the model's head, hands, feet, and background 100% UNCHANGED. Do NOT paint areas that do not require clothing. "
-                f"2. BOUNDARY LOCK: For tops/outerwear, the hemline MUST end precisely at the {u_w}cm waistline. DO NOT extend fabric; IT IS NOT A DRESS. "
-                f"3. AUTO-COMPLETION: {'NONE.' if garments_ctx['has_bottom'] else 'CRITICAL: No lower-body garment detected; paint plain MATTE BLACK trousers to complete the look.'} "
-                f"4. FIDELITY: Maintain 100% color, texture grain, and graphic anchor (logos/hardware) from the source images. "
-                f"### OUTPUT: A high-resolution, seamless, and photorealistic composite image."
+                f"1. CHROMA-KEY ENVIRONMENT: Synthesize the model against a UNIFORM, SOLID WHITE background. Ensure maximum contrast between the garment edges and the background. NO complex shadows, NO props, and NO background textures. "
+                f"2. FULL-BODY VISIBILITY: Ensure the entire person (head to toe) is rendered within the frame. Even if the original photo is cropped, attempt to complete the silhouette for a full-body look. "
+                f"3. ANATOMICAL FIDELITY: Keep the model's face, skin texture, and body proportions 100% UNCHANGED. Only apply garments over the body. "
+                f"4. BOUNDARY LOCK: For tops/outerwear, the hemline MUST end precisely at the {u_w}cm waistline. DO NOT extend fabric; IT IS NOT A DRESS. "
+                f"5. AUTO-COMPLETION: {'NONE.' if garments_ctx['has_bottom'] else 'CRITICAL: No lower-body garment detected; paint plain MATTE BLACK trousers to complete the look.'} "
+                f"6. TEXTURE FIDELITY: Maintain 100% color accuracy, fabric grain, and logos from the source images. "
+
+                f"### OUTPUT: A high-resolution, photorealistic composite image with sharp, clean edges against a solid white studio background."
             )
 
             source_images = [item['img'] for item in garments_ctx['items']]
             
+            # --- [2. 調用 AI 進行合成] ---
             response = self.client.models.generate_content(
                 model=self.model_name,
                 contents=[model_image, *source_images, final_prompt]
             )
             
-            # --- [關鍵修正：檢查 Response 是否有效] ---
+            # --- [3. 狀態攔截：2422 偵測不到人體 / 安全過濾] ---
             if not response or not response.candidates:
-                logger.error("❌ Gemini 回傳空回應 (可能觸發安全過濾器)")
-                return {
-                    "error_code": 2422,
-                    "suggest": "Please use a clearer photo with a visible person. Content blocked by safety filters."
-                }, "fail"
+                return {"error_code": 2422, "suggest": "Content blocked by safety filters or no human detected."}, "fail"
 
-            # --- [AI 狀態攔截點] ---
-            # 增加安全檢查，防止 .text 在沒有內容時噴錯
             try:
-                response_text = response.text
-                if "ERROR: NO_HUMAN_DETECTED" in response_text:
-                    logger.error("❌ Gemini 主動終止：model_image 偵測不到人體")
-                    return {
-                        "error_code": 2422,
-                        "suggest": "Please use a clearer photo with a visible person. The provided model_image is not valid."
-                    }, "fail"
-            except Exception:
-                # 如果連 .text 都拿不到，代表回應中可能只有圖片或根本沒東西
+                if "ERROR: NO_HUMAN_DETECTED" in response.text:
+                    return {"error_code": 2422, "suggest": "The provided model_image is not valid. No human detected."}, "fail"
+            except:
                 pass
 
-            # 取得結果圖片物件
+            # --- [4. 解析結果圖片] ---
             try:
-                # 確保 candidates[0].content.parts 存在
                 parts = response.candidates[0].content.parts
-                # 尋找含有圖片數據的 part
-                generated_part = next((part for part in parts if hasattr(part, 'inline_data') and part.inline_data or getattr(part, 'blob', None)), None)
+                generated_part = next((p for p in parts if hasattr(p, 'inline_data') or getattr(p, 'blob', None)), None)
                 
                 if not generated_part:
-                    raise ValueError("No image part found in response")
+                    raise ValueError("No image part found")
 
-                if hasattr(generated_part, 'inline_data') and generated_part.inline_data:
-                    image_bytes = generated_part.inline_data.data
-                else:
-                    image_bytes = generated_part.blob.data
-                
+                image_bytes = generated_part.inline_data.data if hasattr(generated_part, 'inline_data') else generated_part.blob.data
                 result_pil = Image.open(io.BytesIO(image_bytes))
 
-            except (StopIteration, Exception) as e:
-                logger.error(f"❌ 解析圖片數據失敗: {e}")
-                return {
-                    "error_code": 2422,
-                    "suggest": "Please use a clearer photo with a visible person. Our engine couldn't detect a human body to dress."
-                }, "fail"
+            except Exception as e:
+                return {"error_code": 2422, "suggest": "Our engine couldn't detect a clear human body structure."}, "fail"
 
-            return {
-                "success": True, 
-                "result_image": result_pil, 
-                "status": "success"
-            }, "success"
+            # --- [5. 後處理：二次去背與重新置中佈局] ---
+            try:
+                # 使用 rembg 進行二次去背，取得透明人像
+                processed_png, success, _, _ = self.remove_background(result_pil)
+                if not success:
+                    processed_png = result_pil.convert("RGBA")
+
+                # 創建純白滿版畫布
+                orig_w, orig_h = result_pil.size
+                canvas = Image.new("RGB", (orig_w, orig_h), (255, 255, 255))
+
+                # 計算置中與底部預留白邊 (Padding)
+                bbox = processed_png.getbbox()
+                if bbox:
+                    person_img = processed_png.crop(bbox)
+                    p_w, p_h = person_img.size
+                    
+                    # 水平置中
+                    paste_x = (orig_w - p_w) // 2
+                    
+                    # 底部預留 10% 的畫布高度作為白邊
+                    bottom_padding = int(orig_h * 0.1)
+                    paste_y = orig_h - p_h - bottom_padding
+                    
+                    # 頂部安全檢查
+                    if paste_y < 0: paste_y = 10
+                    
+                    canvas.paste(person_img, (paste_x, paste_y), person_img)
+                    final_output = canvas
+                else:
+                    final_output = result_pil
+
+            except Exception as e:
+                logger.error(f"❌ 後處理構圖失敗: {e}")
+                final_output = result_pil
+
+            return {"result_image": final_output, "status": "success"}, "success"
 
         except Exception as e:
             err_msg = str(e).lower()
             logger.error(f"❌ Step 5 合成嚴重失敗: {e}")
-            
-            if any(word in err_msg for word in ["person", "human", "safety", "block", "finish_reason"]):
-                return {
-                    "error_code": 2422,
-                    "suggest": "Please use a clearer photo with a visible person."
-                }, "fail"
-            
-            return {
-                "error_code": 2501,
-                "suggest": f"AI Synthesis service abnormal: {str(e)}"
-            }, "fail"
-    
+            if any(word in err_msg for word in ["person", "human", "safety", "block"]):
+                return {"error_code": 2422, "suggest": "Please use a clearer photo with a visible person."}, "fail"
+            return {"error_code": 2501, "suggest": f"AI Synthesis service abnormal: {str(e)}"}, "fail"
     
     
     
