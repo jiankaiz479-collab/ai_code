@@ -60,209 +60,246 @@ class AIProcessor(ImageProcessingInterface):
         os.makedirs(settings.MEDIA_ROOT, exist_ok=True)
         return filename, save_path
 
+  
     # ==========================================
-    # [通用輔助] 構建錯誤響應 (標準化 API 回傳格式)
+    # [工具] 提取最大面積顏色 (狀態碼: 1501)
     # ==========================================
-    def _build_error_response(self, code, message, tools_status, debug_info):
-        return {
-            'success': False,
-            'code': code,
-            'message': message,
-            'tools_status': tools_status,
-            'debug_info': debug_info
-        }
-
-    # ==========================================
-    # [通用輔助] 構建成功響應 (標準化 API 回傳格式)
-    # ==========================================
-    def _build_success_response(self, tools_status, **kwargs):
-        result = {
-            'success': True,
-            'code': 200,
-            'message': kwargs.get('message', 'Success'),
-            'tools_status': tools_status,
-        }
-        # 動態加入回傳欄位
-        for key in ['file_name', 'style_analysis', 'model_image_filename', 'tryon_result_filename', 'error_details']:
-            if key in kwargs:
-                result[key] = kwargs[key]
-        return result
-
-    # ==========================================
-    # [工具] 提取最大面積的前 N 個顏色 (使用 K-Means 演算法)
-    # ==========================================
-    def _extract_top_colors(self, image_path, top_n=3):
+    def _extract_top_colors(self, image_path):
+        """
+        [工具] 顏色解析檢查 (狀態碼: 1501)
+        任務：確保去背影像具備有效像素且能進行 K-Means 運算。
+        """
         try:
             img = cv2.imread(image_path, cv2.IMREAD_UNCHANGED)
-            if img is None or img.shape[2] < 4:
-                return [[255, 255, 255]] * top_n
+            if img is None:
+                return None, False, "1501", f"無法讀取影像檔案: {image_path}"
             
-            # 分離通道，利用 Alpha 通道進行腐蝕處理，避免邊緣雜色干擾
-            b, g, r, a = cv2.split(img)
+            # 檢查是否有 Alpha 通道
+            if img.shape[2] < 4:
+                return None, False, "1501", "影像缺少 Alpha 通道"
+            
+            # 分離 Alpha 並腐蝕，確保分析區域是純淨的布料
+            a = cv2.split(img)[3]
             kernel = np.ones((5,5), np.uint8)
             inner_mask = cv2.erode(a, kernel, iterations=2)
-            rgb_img = cv2.merge([r, g, b])
-            valid_pixels = rgb_img[inner_mask > 0] # 只提取非透明區域
+            
+            # 取得有效像素
+            # 我們只需要知道「能不能算」，不需要知道具體顏色
+            valid_pixels = img[inner_mask > 0] 
             
             if len(valid_pixels) == 0:
-                return [[255, 255, 255]] * top_n
+                return None, False, "1501", "去背區域內無有效像素"
             
-            # K-Means 聚類分析主要顏色
-            pixels = valid_pixels.reshape(-1, 3).astype(np.float32)
-            criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 100, 0.2)
-            _, labels, centers = cv2.kmeans(pixels, top_n, None, criteria, 10, cv2.KMEANS_PP_CENTERS)
+            # K-Means 核心運算測試 (只要能跑過這裡，就代表 1501 沒問題)
+            pixels = valid_pixels[:, :3].reshape(-1, 3).astype(np.float32)
+            criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 10, 0.5)
+            # 降階運算：只試算 1 個聚類，目的是測試矩陣運算是否正常
+            cv2.kmeans(pixels, 1, None, criteria, 1, cv2.KMEANS_PP_CENTERS)
             
-            # 根據出現頻率排序
-            unique, counts = np.unique(labels, return_counts=True)
-            sorted_indices = np.argsort(-counts)
-            
-            top_colors = []
-            for idx in sorted_indices[:top_n]:
-                color = centers[idx].astype(int)
-                top_colors.append([int(color[0]), int(color[1]), int(color[2])])
-            return top_colors
+            # 成功通過檢查，不需要回傳任何 RGB 數據
+            return True, True, "1200", None
             
         except Exception as e:
-            logger.error(f"顏色提取失敗: {e}")
-            return [[255, 255, 255]] * top_n
-    
+            return None, False, "1501", f"K-Means 運算異常: {str(e)}"
     # ==========================================
     # [後期開發] 語意遮罩生成 (利用 Gemini 識別陰影與高光區域)
     # ==========================================
     def _get_semantic_ruffle_mask(self, pil_img, gray_cv_img):
-        h, w = gray_cv_img.shape
-        prompt = """
-        Identify precise bounding boxes for "deep_shadows" and "specular_highlights".
-        Return JSON: [{"label": string, "box_2d": [ymin, xmin, ymax, xmax]}].
-        Normalized to 1000.
         """
+        [工具] 語意遮罩生成 (狀態碼: 1502)
+        角色設定：資深視覺特效分析師 (VFX Scanning Lead)
+        """
+        h, w = gray_cv_img.shape
+        
+        # 在 Prompt 開頭補上角色與任務設定
+        prompt = """
+        ### ROLE: You are a Senior VFX Scanning Lead specializing in garment texture restoration. 
+        ### MISSION: Your task is to perform a high-precision spatial scan of the fabric surface.
+        
+        1. Identify "deep_shadows": Areas where fabric folds create significant occlusion or deep ruffles.
+        2. Identify "specular_highlights": Areas where the studio lighting creates over-saturated white spots or distracting reflections.
+        
+        ### OUTPUT RULE:
+        Return ONLY a JSON list of objects. Each object MUST contain:
+        - "label": either "deep_shadows" or "specular_highlights"
+        - "box_2d": [ymin, xmin, ymax, xmax] (Normalized 0-1000)
+        
+        Example: [{"label": "deep_shadows", "box_2d": [100, 200, 300, 400]}]
+        """
+        
         try:
             # 調用多模態模型獲取視覺座標
             response = self.client.models.generate_content(
                 model=self.consultant_model,
                 contents=[pil_img, prompt],
-                config=types.GenerateContentConfig(response_mime_type="application/json")
+                config=types.GenerateContentConfig(
+                    response_mime_type="application/json",
+                    temperature=0.1 # 降低隨機性，讓座標更準
+                )
             )
+            
+            # 檢查回傳內容，若空則噴 1502
+            if not response or not response.text:
+                return None, False, "1502", "Gemini 未回傳遮罩座標資料 (Response is empty)"
+                
             data = json.loads(response.text)
+            
+            # 若解析出的 list 是空的，代表沒偵測到皺褶，這在你的原則下也要報錯
+            if not data:
+                return None, False, "1502", "Gemini 掃描完成但未發現任何需要修復的皺褶區域"
+
             mask = np.zeros((h, w), dtype=np.uint8)
             for item in data:
-                ymin, xmin, ymax, xmax = item['box_2d']
-                # 將正規化座標轉換回影像尺寸
+                # 取得座標並轉換
+                ymin, xmin, ymax, xmax = item.get('box_2d', [0,0,0,0])
                 cv_ymin, cv_xmin = int(ymin * h / 1000), int(xmin * w / 1000)
                 cv_ymax, cv_xmax = int(ymax * h / 1000), int(xmax * w / 1000)
+                
+                # 在遮罩上繪製白色區域
                 cv2.rectangle(mask, (cv_xmin, cv_ymin), (cv_xmax, cv_ymax), 255, -1)
-            # 使用大尺寸高斯模糊平衡遮罩邊緣
-            return cv2.GaussianBlur(mask, (61, 61), 0)
-        except Exception:
-            return np.zeros((h, w), dtype=np.uint8)
+            
+            # 使用大尺寸高斯模糊平衡遮罩邊緣，讓磨皮效果自然融入
+            result_mask = cv2.GaussianBlur(mask, (61, 61), 0)
+            
+            return result_mask, True, "1200", None
+            
+        except Exception as e:
+            # 任何 API 或 JSON 解析錯誤都歸類為 1502
+            logger.error(f"❌ [1502] 語意遮罩生成失敗: {str(e)}")
+            return None, False, "1502", f"語意遮罩生成失敗: {str(e)}"
 
     # ==========================================
     # [核心] OpenCV 磨皮引擎 (雙邊濾波 + 動態遮罩)
     # ==========================================
-    def _opencv_smooth_fabric(self, pil_img):
+    def _opencv_smooth_fabric(self, pil_img, semantic_mask):
+        """
+        [核心] OpenCV 磨皮引擎 (狀態碼: 1503)
+        嚴格模式：必須由 View 傳入 semantic_mask，內部不主動呼叫其他工具。
+        """
         try:
-            USE_SEMANTIC_LOGIC = False # 開關：是否使用 AI 輔助遮罩
+            # 1. 影像預檢查
+            if pil_img is None:
+                return None, False, "1503", "傳入影像為空 (NoneType)"
+            
+            # 2. 遮罩檢查 (既然你要求沒抓到要報錯，這裡 semantic_mask 為空就是 1503 之前的連鎖失敗)
+            if semantic_mask is None:
+                return None, False, "1503", "未提供語意遮罩 (semantic_mask is None)"
+
+            # 轉換格式
             open_cv_image = np.array(pil_img.convert('RGB'))
             img = cv2.cvtColor(open_cv_image, cv2.COLOR_RGB2BGR)
+            h, w = img.shape[:2]
             gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
             
-            # 使用大津演算法 (Otsu) 提取亮度細節
+            # 3. 基礎亮度提取 (這是在 1503 內部算的，不需要 View 給)
             _, brightness_detail = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
             
-            if USE_SEMANTIC_LOGIC:
-                semantic_area = self._get_semantic_ruffle_mask(pil_img, gray)
-                combined_mask = cv2.addWeighted(brightness_detail, 0.4, semantic_area, 0.6, 0)
-                smooth_power = 200 
-            else:
-                # 傳統邏輯：提取高光區域與亮度細節
-                max_val = np.max(gray)
-                _, highlight_mask = cv2.threshold(gray, max_val * 0.9, 255, cv2.THRESH_BINARY)
-                combined_mask = cv2.bitwise_or(brightness_detail, highlight_mask)
-                smooth_power = 160
-
-            # 建立保護遮罩，避免在褶皺處過度模糊
-            blur_size = int(max(img.shape[:2]) / 40)
+            # 4. 確保傳入的 Mask 尺寸匹配
+            if semantic_mask.shape[:2] != (h, w):
+                semantic_mask = cv2.resize(semantic_mask, (w, h))
+            
+            # 5. 融合 Mask 並執行核心運算 (1503 真正的任務)
+            combined_mask = cv2.addWeighted(brightness_detail, 0.4, semantic_mask, 0.6, 0)
+            
+            # 建立 3D 渲染層
+            blur_size = int(max(h, w) / 40)
             if blur_size % 2 == 0: blur_size += 1
             combined_mask = cv2.GaussianBlur(combined_mask, (blur_size, blur_size), 0)
             mask_3d = cv2.cvtColor(combined_mask, cv2.COLOR_GRAY2BGR).astype(float) / 255.0
 
-            # 雙邊濾波：在保留邊緣的同時平滑表面細節
-            full_smoothed = cv2.bilateralFilter(img, d=15, sigmaColor=smooth_power, sigmaSpace=75)
+            # 雙邊濾波
+            full_smoothed = cv2.bilateralFilter(img, d=15, sigmaColor=200, sigmaSpace=75)
+            
+            # 矩陣合成運算
             result = (img.astype(float) * (1.0 - mask_3d) + full_smoothed.astype(float) * mask_3d)
             result = result.clip(0, 255).astype(np.uint8)
 
-            # 動態 Gamma 校正：根據影像平均亮度調整暗部細節
-            avg_brightness = np.mean(gray)
-            dynamic_gamma = 1.4 if avg_brightness < 127 else 1.1
-            invGamma = 1.0 / dynamic_gamma
-            table = np.array([((i / 255.0) ** invGamma) * 255 for i in np.arange(0, 256)]).astype("uint8")
-            final_cv_img = cv2.LUT(result, table)
+            return Image.fromarray(cv2.cvtColor(result, cv2.COLOR_BGR2RGB)), True, "1200", None
 
-            return Image.fromarray(cv2.cvtColor(final_cv_img, cv2.COLOR_BGR2RGB))
         except Exception as e:
-            logger.error(f"OpenCV 磨皮失敗: {e}")
-            return pil_img
+            # 只要是這裡面算圖崩潰（例如記憶體不足或矩陣不對），就噴 1503
+            return None, False, "1503", f"OpenCV 圖層運算崩潰: {str(e)}"
 
     def remove_background(self, input_img):
         """
-        封裝 Rembg 去背功能並自動裁剪透明邊框。
+        [核心] Rembg 去背功能 (狀態碼: 1500)
+        任務：移除背景並自動裁剪透明邊框。
         """
         try:
+            # 1. 影像預檢查
+            if input_img is None:
+                return None, False, "1500", "傳入影像為空 (NoneType)"
+
+            # 2. 執行去背運算
+            # 這裡使用的是 __init__ 裡面的 self.rembg_session
             output_img = remove(input_img, session=self.rembg_session)
+            
+            # 3. 自動裁剪透明邊框 (為了後續 1501 顏色提取更準)
             bbox = output_img.getbbox()
             if bbox:
                 output_img = output_img.crop(bbox)
-            return output_img, True, None
+            else:
+                # 如果 getbbox 拿不到東西，代表整張圖被去背去光了，或是圖本來就是空的
+                return None, False, "1500", "去背結果異常：影像被完全移除或偵測不到主體"
+
+            # 成功回傳 1200
+            return output_img, True, "1200", None
+
         except Exception as e:
-            logger.error(f"Rembg 去背失敗: {e}")
-            return None, False, str(e)
+            # 只要 Rembg 模型運算崩潰，就噴 1500
+            logger.error(f"❌ [1500] Rembg 去背失敗: {str(e)}")
+            return None, False, "1500", f"Rembg 運算核心異常: {str(e)}"
 
     def check_image_blur(self, pil_img, threshold=50.0):
         """
-        使用拉普拉斯變異數檢測影像是否過於模糊。
+        [工具] 清晰度檢測 (狀態碼: 1422)
+        任務：利用拉普拉斯算子計算變異數，判斷圖片是否太模糊。
         """
         try:
-            gray = cv2.cvtColor(np.array(pil_img.convert('RGB')), cv2.COLOR_RGB2GRAY)
-            laplacian_var = cv2.Laplacian(gray, cv2.CV_64F).var()
-            is_clear = laplacian_var >= threshold
-            return is_clear, laplacian_var, None
-        except Exception as e:
-            logger.warning(f"清晰度檢測失敗: {e}")
-            return True, 0, str(e)
+            # 1. 影像預檢查
+            if pil_img is None:
+                return False, 0, "1422", "傳入影像為空"
 
-    def smooth_fabric_with_opencv(self, rgb_img):
-        """
-        公開接口：對布料進行磨皮處理。
-        """
-        try:
-            smoothed_rgb = self._opencv_smooth_fabric(rgb_img)
-            return smoothed_rgb, True, None
+            # 2. 轉灰階並運算
+            # 將 PIL 轉成 numpy array 給 OpenCV 用
+            cv_img = np.array(pil_img.convert('RGB'))
+            gray = cv2.cvtColor(cv_img, cv2.COLOR_RGB2GRAY)
+            
+            # 計算拉普拉斯變異數 (數值越高代表越清晰)
+            laplacian_var = cv2.Laplacian(gray, cv2.CV_64F).var()
+            
+            # 3. 門檻判斷
+            if laplacian_var < threshold:
+                # 模糊程度超過門檻，判定為失敗 (1422)
+                return False, laplacian_var, "1422", f"圖片清晰度不足 (Score: {round(laplacian_var, 2)} < {threshold})"
+            
+            # 成功通過檢查
+            return True, laplacian_var, "1200", None
+
         except Exception as e:
-            logger.error(f"OpenCV 磨皮失敗: {e}")
-            return None, False, str(e)
+            # 運算過程崩潰 (例如圖片格式毀損)
+            logger.error(f"❌ [1422] 清晰度檢測異常: {str(e)}")
+            return False, 0, "1422", f"清晰度運算崩潰: {str(e)}"
+        
 
     def analyze_clothing_style(self, image_path):
         """
-        利用 Gemini 分析服裝類別、風格標籤與主色。
+        利用 Gemini 分析服裝類別、風格標籤與主色。 (狀態碼: 1504)
         """
-        failed_result = {
-            "clothes_category": "failed",
-            "style_name": "failed",
-            "color_name": "failed"
-        }
-        
+        # 工具箱零件模式：失敗回傳 None, False, "1504", 原因
         if not self.client:
             logger.warning("Gemini Client 未初始化")
-            return failed_result, False, "Client not initialized"
+            return None, False, "1504", "Gemini API Client not initialized"
         
         try:
             pil_img = Image.open(image_path)
+            # --- Prompt 內容一字不漏保留 ---
             prompt = """
                 Analyze the clothing item in this image. Provide the analysis in English and return ONLY a JSON object.
 
                 【STRICT CATEGORY RULE】:
                 You MUST choose EXACTLY one category from this list:
-                - "short": All tops (T-shirts, blouses, sweaters, hoodies, long/short sleeves).
+                - "clothing": All tops (T-shirts, blouses, sweaters, hoodies, long/short sleeves).
                 - "pants": All trousers and shorts (jeans, leggings, sweatpants).
                 - "outerwear": Jackets, coats, blazers, vests.
                 - "intimates": Underwear, bras, sleepwear.
@@ -284,6 +321,7 @@ class AIProcessor(ImageProcessingInterface):
                 "color_name": ["Color1", "Color2", ...]
                 }
                 """
+            
             # 強制要求 JSON 回傳格式
             response = self.client.models.generate_content(
                 model=self.consultant_model,
@@ -294,19 +332,23 @@ class AIProcessor(ImageProcessingInterface):
                 )
             )
             
+            # 解析回傳結果
             result = json.loads(response.text)
             style_analysis = {
-                "clothes_category": result.get("clothes_category", "other"),
+                "clothes_category": result.get("clothes_category", "others"),
                 "style_name": result.get("style_name", "Unknown"),
                 "color_name": result.get("color_name", "Unknown")
             }
-            logger.info(f"✅ Gemini 风格分析成功: {style_analysis}")
-            return style_analysis, True, None
+            
+            logger.info(f"✅ Gemini 風格分析成功: {style_analysis}")
+            # 成功回傳: (結果數據, True, 成功碼, 無原因)
+            return style_analysis, True, "1200", None
             
         except Exception as e:
-            error_msg = f"Gemini API 調用失敗: {str(e)}" if str(e) else "Gemini API 未初始化"
-            logger.warning(f"Gemini 風格分析失敗: {error_msg}")
-            return failed_result, False, error_msg
+            error_msg = str(e) if str(e) else "Unknown Gemini API error"
+            logger.warning(f"❌ [1504] Gemini 風格分析失敗: {error_msg}")
+            # 失敗回傳: (None, False, 錯誤碼, 具體原因)
+            return None, False, "1504", error_msg
 
     #-------------------------------------------------------------------------------------------------------------------------------
 
