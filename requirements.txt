@@ -11,18 +11,18 @@ numpy>=1.26,<3.0
 scipy>=1.11
 
 # --- DensePose / Detectron2 核心依賴 (從 Dockerfile 移入) ---
-# cython
-# pycocotools>=2.0
-# termcolor
-# yacs
-# tabulate
-# cloudpickle
-# matplotlib
-# tqdm
-# omegaconf
-# fvcore
-# iopath
-# av>=12.0
+cython
+pycocotools>=2.0
+termcolor
+yacs
+tabulate
+cloudpickle
+matplotlib
+tqdm
+omegaconf
+fvcore
+iopath
+av>=12.0
 
 # --- 網路工具 ---
 requests>=2.31
