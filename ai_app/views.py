@@ -1,7 +1,6 @@
 import os
 import io
 import json
-import cv2
 import numpy as np  # 如果你有用到 np.array 也要補這行
 import logging
 from PIL import Image, ImageEnhance
@@ -26,7 +25,7 @@ class RemoveBgView(View):
     def post(self, request, *args, **kwargs):
         clothes_image = request.FILES.get('clothes_image')
         
-        # [1400] & [1415] 基礎檢查
+        # 基礎檢查 1400 / 1415
         if not clothes_image:
             return JsonResponse({"code": 400, "message": "1400"}, status=400)
         if not clothes_image.content_type.startswith('image/'):
@@ -37,76 +36,52 @@ class RemoveBgView(View):
             if hasattr(clothes_image, 'seek'): clothes_image.seek(0)
             input_pil = Image.open(clothes_image).convert("RGBA")
 
-            # 1. 去背 [1500]
-            output_img, success, code, _ = processor.remove_background(input_pil)
-            if not success: return JsonResponse({"code": 500, "message": code}, status=500)
+            # --- 第一關：去背處理 [1500] ---
+            output_img, success, code, err = processor.remove_background(input_pil)
+            if not success: 
+                # 如果是去背失敗，code 會回傳 1500
+                return JsonResponse({"code": 500, "message": code, "err": err}, status=500)
 
-            # 2. 清晰度檢測 [1422]
-            is_clear, _, code, _ = processor.check_image_blur(output_img)
-            if not is_clear: return JsonResponse({"code": 422, "message": code}, status=422)
-
-            # 準備磨皮所需的圖
-            r, g, b, a = output_img.split()
-            rgb_img = Image.merge('RGB', (r, g, b))
-            gray_cv = cv2.cvtColor(np.array(rgb_img), cv2.COLOR_RGB2GRAY)
-            
-            # 3. 獲取遮罩 [1502]
-            mask, success, code, _ = processor._get_semantic_ruffle_mask(rgb_img, gray_cv)
-            if not success: return JsonResponse({"code": 500, "message": code}, status=500)
-
-            # 4. 執行磨皮 [1503]
-            smoothed_pil, success, code, _ = processor._opencv_smooth_fabric(rgb_img, mask)
-            if not success: return JsonResponse({"code": 500, "message": code}, status=500)
-
-            # 合併 A 通道並存檔
-            final_output = Image.merge('RGBA', (*smoothed_pil.split(), a))
+            # 暫存去背後的圖供後續分析
             file_name, file_path = processor.get_unique_filename(prefix="processed", ext="png")
-            final_output.save(file_path, "PNG")
+            output_img.save(file_path, "PNG")
 
-            # 5. 提取顏色 [1501] (只檢查，不拿數據)
-            _, success, code, _ = processor._extract_top_colors(file_path)
-            if not success: return JsonResponse({"code": 500, "message": code}, status=500)
 
-            # 6. 時尚風格分析 [1504]
-            style_analysis, success, code, _ = processor.analyze_clothing_style(file_path)
-            if not success: return JsonResponse({"code": 500, "message": code}, status=500)
+            # --- 第三關：時尚風格分析 [1501] ---
+            # 注意：這裡原本是 1504，我幫你順延改成 1501
+            style_analysis, success, code, err = processor.analyze_clothing_style(file_path)
+            if not success: 
+                # 這裡要確保 analyze_clothing_style 內部出錯時回傳的是 1501
+                return JsonResponse({"code": 500, "message": "1501", "err": err}, status=500)
 
-            # [1200 OK] 封裝回傳內容 (格式化 JSON)
+            # 將 1501 抓到的顏色整合進去
+            # style_analysis['detected_colors'] = color_list
+
+            # ========== [成功回覆: 1200 OK] ==========
             analysis_data = {
                 "code": 200,
                 "message": "1200",
                 "data": {
                     "file_name": file_name,
-                    "file_format": "PNG",
-                    "style_analysis": style_analysis
+                    "style_analysis": style_analysis,
                 }
             }
-            # 使用 indent=4 讓 JSON 漂亮換行，ensure_ascii=False 確保中文或特殊字元不亂碼
             json_pretty = json.dumps(analysis_data, indent=4, ensure_ascii=False)
 
-            # Multipart 回傳 (JSON + Image)
+            # Multipart 回傳格式
             boundary = 'bg_removal_boundary'
-            response_body = []
-            
-            # Part 1: JSON 區塊
-            response_body.append(f'--{boundary}\r\n'.encode('utf-8'))
-            response_body.append(b'Content-Disposition: form-data; name="analysis"\r\n')
-            response_body.append(b'Content-Type: application/json\r\n\r\n')
-            response_body.append(json_pretty.encode('utf-8')) # 這裡就會是你要的一行一個參數
-            response_body.append(b'\r\n')
-            
-            # Part 2: Image 區塊
-            response_body.append(f'--{boundary}\r\n'.encode('utf-8'))
-            response_body.append(f'Content-Disposition: form-data; name="processed_image"; filename="{file_name}"\r\n'.encode('utf-8'))
-            response_body.append(b'Content-Type: image/png\r\n\r\n')
+            response_body = [
+                f'--{boundary}\r\nContent-Disposition: form-data; name="analysis"\r\nContent-Type: application/json\r\n\r\n{json_pretty}\r\n'.encode('utf-8'),
+                f'--{boundary}\r\nContent-Disposition: form-data; name="processed_image"; filename="{file_name}"\r\nContent-Type: image/png\r\n\r\n'.encode('utf-8')
+            ]
             with open(file_path, 'rb') as f:
                 response_body.append(f.read())
-            response_body.append(b'\r\n')
-            response_body.append(f'--{boundary}--\r\n'.encode('utf-8'))
+            response_body.append(f'\r\n--{boundary}--\r\n'.encode('utf-8'))
             
             return HttpResponse(b''.join(response_body), content_type=f'multipart/form-data; boundary={boundary}')
 
         except Exception as e:
+            # 任何未預期的崩潰統一噴 1500 (系統基礎錯誤)
             return JsonResponse({"code": 500, "message": "1500", "debug": str(e)}, status=500)
 
 

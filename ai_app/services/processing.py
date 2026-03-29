@@ -17,7 +17,7 @@ logger = logging.getLogger(__name__)
 
 class AIProcessor(ImageProcessingInterface):
     """
-    AI 影像處理核心類別：負責去背、磨皮、顏色提取及 Gemini 試穿合成。
+    AI 影像處理核心類別：負責去背、顏色提取及 Gemini 試穿合成。
     """
     
     def __init__(self):
@@ -59,167 +59,10 @@ class AIProcessor(ImageProcessingInterface):
         save_path = os.path.join(settings.MEDIA_ROOT, filename)
         os.makedirs(settings.MEDIA_ROOT, exist_ok=True)
         return filename, save_path
-
-  
-    # ==========================================
-    # [工具] 提取最大面積顏色 (狀態碼: 1501)
-    # ==========================================
-    def _extract_top_colors(self, image_path):
-        """
-        [工具] 顏色解析檢查 (狀態碼: 1501)
-        任務：確保去背影像具備有效像素且能進行 K-Means 運算。
-        """
-        try:
-            img = cv2.imread(image_path, cv2.IMREAD_UNCHANGED)
-            if img is None:
-                return None, False, "1501", f"無法讀取影像檔案: {image_path}"
-            
-            # 檢查是否有 Alpha 通道
-            if img.shape[2] < 4:
-                return None, False, "1501", "影像缺少 Alpha 通道"
-            
-            # 分離 Alpha 並腐蝕，確保分析區域是純淨的布料
-            a = cv2.split(img)[3]
-            kernel = np.ones((5,5), np.uint8)
-            inner_mask = cv2.erode(a, kernel, iterations=2)
-            
-            # 取得有效像素
-            # 我們只需要知道「能不能算」，不需要知道具體顏色
-            valid_pixels = img[inner_mask > 0] 
-            
-            if len(valid_pixels) == 0:
-                return None, False, "1501", "去背區域內無有效像素"
-            
-            # K-Means 核心運算測試 (只要能跑過這裡，就代表 1501 沒問題)
-            pixels = valid_pixels[:, :3].reshape(-1, 3).astype(np.float32)
-            criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 10, 0.5)
-            # 降階運算：只試算 1 個聚類，目的是測試矩陣運算是否正常
-            cv2.kmeans(pixels, 1, None, criteria, 1, cv2.KMEANS_PP_CENTERS)
-            
-            # 成功通過檢查，不需要回傳任何 RGB 數據
-            return True, True, "1200", None
-            
-        except Exception as e:
-            return None, False, "1501", f"K-Means 運算異常: {str(e)}"
+    
     # ==========================================
     # [後期開發] 語意遮罩生成 (利用 Gemini 識別陰影與高光區域)
     # ==========================================
-    def _get_semantic_ruffle_mask(self, pil_img, gray_cv_img):
-        """
-        [工具] 語意遮罩生成 (狀態碼: 1502)
-        角色設定：資深視覺特效分析師 (VFX Scanning Lead)
-        """
-        h, w = gray_cv_img.shape
-        
-        # 在 Prompt 開頭補上角色與任務設定
-        prompt = """
-        ### ROLE: You are a Senior VFX Scanning Lead specializing in garment texture restoration. 
-        ### MISSION: Your task is to perform a high-precision spatial scan of the fabric surface.
-        
-        1. Identify "deep_shadows": Areas where fabric folds create significant occlusion or deep ruffles.
-        2. Identify "specular_highlights": Areas where the studio lighting creates over-saturated white spots or distracting reflections.
-        
-        ### OUTPUT RULE:
-        Return ONLY a JSON list of objects. Each object MUST contain:
-        - "label": either "deep_shadows" or "specular_highlights"
-        - "box_2d": [ymin, xmin, ymax, xmax] (Normalized 0-1000)
-        
-        Example: [{"label": "deep_shadows", "box_2d": [100, 200, 300, 400]}]
-        """
-        
-        try:
-            # 調用多模態模型獲取視覺座標
-            response = self.client.models.generate_content(
-                model=self.consultant_model,
-                contents=[pil_img, prompt],
-                config=types.GenerateContentConfig(
-                    response_mime_type="application/json",
-                    temperature=0.1 # 降低隨機性，讓座標更準
-                )
-            )
-            
-            # 檢查回傳內容，若空則噴 1502
-            if not response or not response.text:
-                return None, False, "1502", "Gemini 未回傳遮罩座標資料 (Response is empty)"
-                
-            data = json.loads(response.text)
-            
-            # 若解析出的 list 是空的，代表沒偵測到皺褶，這在你的原則下也要報錯
-            if not data:
-                return None, False, "1502", "Gemini 掃描完成但未發現任何需要修復的皺褶區域"
-
-            mask = np.zeros((h, w), dtype=np.uint8)
-            for item in data:
-                # 取得座標並轉換
-                ymin, xmin, ymax, xmax = item.get('box_2d', [0,0,0,0])
-                cv_ymin, cv_xmin = int(ymin * h / 1000), int(xmin * w / 1000)
-                cv_ymax, cv_xmax = int(ymax * h / 1000), int(xmax * w / 1000)
-                
-                # 在遮罩上繪製白色區域
-                cv2.rectangle(mask, (cv_xmin, cv_ymin), (cv_xmax, cv_ymax), 255, -1)
-            
-            # 使用大尺寸高斯模糊平衡遮罩邊緣，讓磨皮效果自然融入
-            result_mask = cv2.GaussianBlur(mask, (61, 61), 0)
-            
-            return result_mask, True, "1200", None
-            
-        except Exception as e:
-            # 任何 API 或 JSON 解析錯誤都歸類為 1502
-            logger.error(f"❌ [1502] 語意遮罩生成失敗: {str(e)}")
-            return None, False, "1502", f"語意遮罩生成失敗: {str(e)}"
-
-    # ==========================================
-    # [核心] OpenCV 磨皮引擎 (雙邊濾波 + 動態遮罩)
-    # ==========================================
-    def _opencv_smooth_fabric(self, pil_img, semantic_mask):
-        """
-        [核心] OpenCV 磨皮引擎 (狀態碼: 1503)
-        嚴格模式：必須由 View 傳入 semantic_mask，內部不主動呼叫其他工具。
-        """
-        try:
-            # 1. 影像預檢查
-            if pil_img is None:
-                return None, False, "1503", "傳入影像為空 (NoneType)"
-            
-            # 2. 遮罩檢查 (既然你要求沒抓到要報錯，這裡 semantic_mask 為空就是 1503 之前的連鎖失敗)
-            if semantic_mask is None:
-                return None, False, "1503", "未提供語意遮罩 (semantic_mask is None)"
-
-            # 轉換格式
-            open_cv_image = np.array(pil_img.convert('RGB'))
-            img = cv2.cvtColor(open_cv_image, cv2.COLOR_RGB2BGR)
-            h, w = img.shape[:2]
-            gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-            
-            # 3. 基礎亮度提取 (這是在 1503 內部算的，不需要 View 給)
-            _, brightness_detail = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
-            
-            # 4. 確保傳入的 Mask 尺寸匹配
-            if semantic_mask.shape[:2] != (h, w):
-                semantic_mask = cv2.resize(semantic_mask, (w, h))
-            
-            # 5. 融合 Mask 並執行核心運算 (1503 真正的任務)
-            combined_mask = cv2.addWeighted(brightness_detail, 0.4, semantic_mask, 0.6, 0)
-            
-            # 建立 3D 渲染層
-            blur_size = int(max(h, w) / 40)
-            if blur_size % 2 == 0: blur_size += 1
-            combined_mask = cv2.GaussianBlur(combined_mask, (blur_size, blur_size), 0)
-            mask_3d = cv2.cvtColor(combined_mask, cv2.COLOR_GRAY2BGR).astype(float) / 255.0
-
-            # 雙邊濾波
-            full_smoothed = cv2.bilateralFilter(img, d=15, sigmaColor=200, sigmaSpace=75)
-            
-            # 矩陣合成運算
-            result = (img.astype(float) * (1.0 - mask_3d) + full_smoothed.astype(float) * mask_3d)
-            result = result.clip(0, 255).astype(np.uint8)
-
-            return Image.fromarray(cv2.cvtColor(result, cv2.COLOR_BGR2RGB)), True, "1200", None
-
-        except Exception as e:
-            # 只要是這裡面算圖崩潰（例如記憶體不足或矩陣不對），就噴 1503
-            return None, False, "1503", f"OpenCV 圖層運算崩潰: {str(e)}"
-
     def remove_background(self, input_img):
         """
         [核心] Rembg 去背功能 (狀態碼: 1500)
@@ -284,16 +127,15 @@ class AIProcessor(ImageProcessingInterface):
 
     def analyze_clothing_style(self, image_path):
         """
-        利用 Gemini 分析服裝類別、風格標籤與主色。 (狀態碼: 1504)
+        利用 Gemini 分析服裝類別、風格標籤與主色。 (狀態碼: 1501)
         """
-        # 工具箱零件模式：失敗回傳 None, False, "1504", 原因
         if not self.client:
             logger.warning("Gemini Client 未初始化")
-            return None, False, "1504", "Gemini API Client not initialized"
+            return None, False, "1501", "Gemini API Client not initialized"
         
         try:
             pil_img = Image.open(image_path)
-            # --- Prompt 內容一字不漏保留 ---
+            # --- Prompt 保持原樣 ---
             prompt = """
                 Analyze the clothing item in this image. Provide the analysis in English and return ONLY a JSON object.
 
@@ -309,7 +151,6 @@ class AIProcessor(ImageProcessingInterface):
                 【PURE AESTHETIC STYLE RULE】:
                 - "style_name": Identify the fashion aesthetic or genre (e.g., Casual, Formal, Sporty, Streetwear, Vintage, Korean Style, Japanese Style, Preppy, Sweet, Sexy, Minimalist).
                 - Min 3 tags. DO NOT include physical descriptions like "oversized", "slim-fit", or "long-sleeve".
-                - Provide 1-2 tags if the style is simple.
 
                 【COLOR RULE】:
                 - "color_name": List up to 3 dominant color names in English (e.g., Red, Blue, Black, White, Gray).
@@ -322,7 +163,6 @@ class AIProcessor(ImageProcessingInterface):
                 }
                 """
             
-            # 強制要求 JSON 回傳格式
             response = self.client.models.generate_content(
                 model=self.consultant_model,
                 contents=[pil_img, prompt],
@@ -332,38 +172,28 @@ class AIProcessor(ImageProcessingInterface):
                 )
             )
             
-            # 解析回傳結果
             result = json.loads(response.text)
             style_analysis = {
                 "clothes_category": result.get("clothes_category", "others"),
-                "style_name": result.get("style_name", "Unknown"),
-                "color_name": result.get("color_name", "Unknown")
+                "style_name": result.get("style_name", []),
+                "color_name": result.get("color_name", [])
             }
             
             logger.info(f"✅ Gemini 風格分析成功: {style_analysis}")
-            # 成功回傳: (結果數據, True, 成功碼, 無原因)
+            # 成功回傳碼對齊 1200
             return style_analysis, True, "1200", None
             
         except Exception as e:
             error_msg = str(e) if str(e) else "Unknown Gemini API error"
-            logger.warning(f"❌ [1504] Gemini 風格分析失敗: {error_msg}")
-            # 失敗回傳: (None, False, 錯誤碼, 具體原因)
-            return None, False, "1504", error_msg
+            # 失敗碼修正為 1501
+            logger.warning(f"❌ [1501] Gemini 風格分析失敗: {error_msg}")
+            return None, False, "1501", error_msg
 
-    #-------------------------------------------------------------------------------------------------------------------------------
-
-
-
-
-
-
-
-
-
-
-
-
-
+    #--------------------------------------------------------------------------------------------------------------
+    #--------------------------------------------------------------------------------------------------------------
+    #虛擬試穿
+    #--------------------------------------------------------------------------------------------------------------
+    #--------------------------------------------------------------------------------------------------------------
     def tool_garment_analysis(self, garment_files, user_data):
         """
         [Step 3] 幾何掃描：除了邊界，更要求 Gemini 分析材質垂墜度與透明度。
