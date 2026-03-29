@@ -7,7 +7,7 @@ from django.http import JsonResponse, HttpResponse
 from django.views import View
 from django.utils.decorators import method_decorator
 from django.views.decorators.csrf import csrf_exempt
-
+import uuid
 # 從自定義的服務層導入 AI 處理核心
 from .services.processing import AIProcessor
 
@@ -166,119 +166,82 @@ class RemoveBgView(View):
 @method_decorator(csrf_exempt, name='dispatch')
 class TryCombineView(View):
     def post(self, request, *args, **kwargs):
-        # ========== 1. 接收文件與額外 JSON 資料 ==========
-        # 這裡直接拿到的就是 API 傳入的原始文件
+        # ========== 步驟 1: 數據與多檔案接收 ==========
         model_image = request.FILES.get('model_image')
-        garment_image = request.FILES.get('clothes_image')
+        garment_images = request.FILES.getlist('garment_images') 
 
         try:
-            data_str = request.POST.get('data')
-            data = json.loads(data_str) if data_str else {}
-        except json.JSONDecodeError:
-            data = {}
+            data_str = request.POST.get('data', '{}')
+            data = json.loads(data_str)
+            garments_info = data.get('garments', [])
+        except Exception as e:
+            return JsonResponse({"code": 400, "message": "JSON 格式錯誤"}, status=400)
 
-        # ========== 2. 基礎驗證 ==========
-        if not model_image or not garment_image:
-            logger.warning("⚠️ [TryOn] 缺少圖片")
-            return JsonResponse({
-                "code": 400,
-                "message": "Bad Request: 缺少必要圖片",
-                "tools_status": {
-                    "rembg_people": "skipped", 
-                    "densepose_analyzer": "skipped",
-                    "opencv_smoothing": "not_started",
-                    "gemini_consultant": "not_started",
-                    "gemini_model": "not_started"
-                }
-            }, status=400)
+        # ========== 步驟 2: 指標重置與數量驗證 ==========
+        if not model_image or not garment_images:
+            return JsonResponse({"code": 400, "message": "缺少必要圖片"}, status=400)
+        
+        if len(garment_images) != len(garments_info):
+            error_msg = f"數量不匹配: 圖片({len(garment_images)}) vs 資訊({len(garments_info)})"
+            return JsonResponse({"code": 400, "message": error_msg}, status=400)
 
         try:
             processor = AIProcessor()
-            logger.info("🔄 [TryOn] 啟動流水線控制 (直接處理 Stream)...")
+            model_image.seek(0)
+            for g in garment_images: g.seek(0)
+
+            # ========== 步驟 3: 款式分析 (View 呼叫 Processing 邏輯) ==========
+            garments_ctx, consult_status = processor.tool_garment_analysis(garment_images, data)
+
+            # ========== 步驟 4: 影像優化 (View 呼叫 Processing 邏輯) ==========
+            pil_raw = Image.open(model_image).convert("RGB")
+
+            # ========== 步驟 5: 核心合成 (純邏輯運算) ==========
+            # 注意：這裡只會拿回 PIL 影像物件，不包含存檔動作
+            result = processor.virtual_try_on(
+                model_image=pil_raw,
+                garments_ctx=garments_ctx,
+                user_data=data
+            )
             
+            if not result.get('success'):
+                return JsonResponse({"code": 500, "message": result.get('message')}, status=500)
+
+            # ========== 步驟 6: 存檔與 Multipart 封裝 (View 執行 IO) ==========
+            # 1. 存檔邏輯
+            final_image = result.get('result_image')
+            file_name = f"vto_{uuid.uuid4().hex}.png" # 現在 uuid 已定義
+            file_path = os.path.join(settings.MEDIA_ROOT, file_name)
+            final_image.save(file_path, "PNG")
+
+            # 2. 整合狀態
             tools_status = {
                 "rembg_people": "skipped",
                 "densepose_analyzer": "skipped",
-                "opencv_smoothing": "success", 
-                "gemini_consultant": "not_started", 
-                "gemini_model": "not_started"
+                "gemini_consultant": consult_status,
+                "gemini_model": result.get('status')
             }
 
-            # 確保檔案指標在開頭
-            if hasattr(model_image, 'seek'): model_image.seek(0)
-            if hasattr(garment_image, 'seek'): garment_image.seek(0)
-
-            # --- 步驟 3 & 4: 視覺特徵與 Gemini 分析 ---
-            # 直接用 Image.open 讀取 UploadedFile 物件
-            pil_cloth = Image.open(garment_image).convert("RGBA")
-            hex_color = processor._get_dominant_color(pil_cloth)
-            texture_swatch = processor._create_texture_swatch(pil_cloth)
-            
-            tools_status["gemini_consultant"] = "running"
-            analysis_res = processor.analyze_garment(pil_cloth)
-            garment_description = analysis_res.get('description', '')
-            tools_status["gemini_consultant"] = "success"
-
-            # --- 步驟 5: 執行最後的 VFX 合成 ---
-            tools_status["gemini_model"] = "running"
-            
-            # 直接傳入原始的 model_image 與 garment_image 物件
-            result_tryon = processor.virtual_try_on(
-                model_image=model_image,        # 直接傳入文件物件
-                garment_image=garment_image,    # 直接傳入文件物件
-                hex_color=hex_color,
-                texture_swatch=texture_swatch,
-                garment_description=garment_description,
-                model_info=data.get('model_info', {}),
-                garment_info=data.get('garment_info', {})
-            )
-            
-            if not result_tryon.get('success'):
-                return JsonResponse(result_tryon, status=result_tryon.get('code', 422))
-            
-            tools_status["gemini_model"] = "success"
-            tryon_filename = result_tryon.get('tryon_result_filename')
-            tryon_path = os.path.join(settings.MEDIA_ROOT, tryon_filename)
-
-            # ========== 3. 構建響應 ==========
             analysis_data = {
                 "code": 200,
                 "message": "Success",
                 "tools_status": tools_status,
-                "data": {
-                    "file_name": tryon_filename,
-                    "densepose_file": None,
-                    "file_format": "PNG"
-                }
+                "data": {"file_name": file_name, "file_format": "PNG"}
             }
 
+            # 3. 構建 Multipart/mixed 響應
             boundary = 'frame_boundary'
             response_body = []
-            
-            # Part 1: JSON
-            response_body.append(f'--{boundary}\r\n'.encode('utf-8'))
-            response_body.append(b'Content-Type: application/json\r\n\r\n')
+            response_body.append(f'--{boundary}\r\nContent-Type: application/json\r\n\r\n'.encode('utf-8'))
             response_body.append(json.dumps(analysis_data, indent=2, ensure_ascii=False).encode('utf-8'))
             response_body.append(b'\r\n')
-            
-            # Part 2: Image
-            response_body.append(f'--{boundary}\r\n'.encode('utf-8'))
-            response_body.append(b'Content-Type: image/png\r\n')
-            response_body.append(f'Content-Disposition: attachment; filename="{tryon_filename}"\r\n\r\n'.encode('utf-8'))
-            with open(tryon_path, 'rb') as f:
-                response_body.append(f.read())
+            response_body.append(f'--{boundary}\r\nContent-Type: image/png\r\n'.encode('utf-8'))
+            response_body.append(f'Content-Disposition: attachment; filename="{file_name}"\r\n\r\n'.encode('utf-8'))
+            with open(file_path, 'rb') as f: response_body.append(f.read())
             response_body.append(b'\r\n')
-            
             response_body.append(f'--{boundary}--\r\n'.encode('utf-8'))
             
-            logger.info(f"✅ [TryOn] 合成完成 (Stream 模式)。")
-            return HttpResponse(
-                b''.join(response_body), 
-                content_type=f'multipart/mixed; boundary={boundary}'
-            )
+            return HttpResponse(b''.join(response_body), content_type=f'multipart/mixed; boundary={boundary}')
 
         except Exception as e:
-            logger.error(f"❌ [TryOn] 系統錯誤: {str(e)}")
-            import traceback
-            logger.error(traceback.format_exc())
-            return JsonResponse({"code": 500, "message": "Internal Server Error"}, status=500)
+            return JsonResponse({"code": 500, "message": str(e)}, status=500)

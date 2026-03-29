@@ -11,7 +11,7 @@ set -euo pipefail
 ################################################################################
 
 APP_IMAGE="${APP_IMAGE:-ai_code_app}"
-CONTAINER_NAME="${CONTAINER_NAME:-ai_code_container}"
+CONTAINER_NAME="${CONTAINER_NAME:-ai_container}"
 APP_PORT_IN_CONTAINER="8002"
 LOCAL_DENSEPOSE_WEIGHTS="$(pwd)/densepose_assets/model_final_162be9.pkl"
 

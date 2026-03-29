@@ -1,4 +1,5 @@
 import os
+import io
 import uuid
 import logging
 import json
@@ -11,7 +12,6 @@ from rembg import remove, new_session
 from PIL import Image, ImageEnhance
 from google import genai
 from google.genai import types
-
 # 設定日誌記錄器
 logger = logging.getLogger(__name__)
 
@@ -308,211 +308,162 @@ class AIProcessor(ImageProcessingInterface):
             logger.warning(f"Gemini 風格分析失敗: {error_msg}")
             return failed_result, False, error_msg
 
-    # ==========================================
-    # [VFX 工具] 視覺特徵提取
-    # ==========================================
-    def _get_dominant_color(self, pil_img):
+    #-------------------------------------------------------------------------------------------------------------------------------
+
+
+
+
+
+
+
+
+
+
+
+
+
+    def tool_garment_analysis(self, garment_files, user_data):
         """
-        計算圖片主色調，過濾透明背景、極白與極黑雜訊。
+        [Step 3] 幾何掃描：除了邊界，更要求 Gemini 分析材質垂墜度與透明度。
         """
-        try:
-            img = pil_img.convert("RGBA")
-            img.thumbnail((200, 200)) # 縮小尺寸提高運算速度
-            colors = img.getcolors(maxcolors=200*200)
-            if not colors:
-                return "#000000"
-            valid_colors = []
-            for count, color in colors:
-                r, g, b, a = color
-                if a < 128: continue # 過濾透明像素
-                if r > 250 and g > 250 and b > 250: continue # 過濾接近白色
-                if r < 5 and g < 5 and b < 5: continue # 過濾接近黑色
-                valid_colors.append((count, (r, g, b)))
-            if not valid_colors:
-                return "original color"
-            valid_colors.sort(key=lambda x: x[0], reverse=True)
-            top_color = valid_colors[0][1]
-            return '#{:02x}{:02x}{:02x}'.format(top_color[0], top_color[1], top_color[2])
-        except Exception as e:
-            logger.warning(f"⚠️ 取色失敗: {e}")
-            return "original color"
+        from google.genai import types  # 確保有匯入此類型
+        
+        items = []
+        has_bottom = False
+        info_list = user_data.get('garments', [])
 
-    def _create_texture_swatch(self, pil_img):
+        # 虛擬繪畫工程師專業掃描 Prompt (強化版)
+        analysis_prompt = """
+        ### Role: Senior Computer Vision & VFX Engineer. 
+        ### Task: Perform a "Geometric Scan" of the uploaded garment image.
+        ### Output Format: (STRICT JSON)
+        {
+          "neckline_geometry": "e.g., Narrow Crew-neck, Deep V-plunge. Sit relative to collarbone.",
+          "hemline_termination": "e.g., Cropped at high-waist, Standard hip-length. Exact vertical cut-off.",
+          "sleeve_termination": "e.g., Full-length to wrist, Quarter-length to elbow. Cuff or raw edge?",
+          
+          "material_properties": "e.g., Rigid canvas, Fluid silk, Weighted fleece. Define stiffness and drape behavior.",
+          "transparency_level": "e.g., 100% Opaque, Semi-sheer, Transparent. Identify which background/skin would be visible through the weave.",
+          
+          "fit_category": "e.g., Compression/Skin-tight, Oversized/Boxy. Volume between fabric and standard body.",
+          "color_hex": "Primary hex code.",
+          "graphic_anchors": "Logo or pattern coordinate."
+        }
+        ### Constraints:
+        - VTO Optimized: Focus on info that helps a model know WHICH skin to cover and WHICH skin to keep.
         """
-        裁切圖片中心區域，生成材質採樣塊 (Swatch)。
-        """
-        width, height = pil_img.size
-        left = width * 0.25
-        top = height * 0.25
-        right = width * 0.75
-        bottom = height * 0.75
-        return pil_img.crop((left, top, right, bottom))
 
-    def analyze_garment(self, pil_cloth_img):
-        """
-        技術分析：生成服裝的「數位孿生」描述。
-        這段程式碼維持你原本最精確的幾何掃描邏輯，作為後續合成的「圖紙」。
-        """
-        print(f"🧐 [AI 分析] 正在執行幾何掃描與物理特性解析...")
-        try:
-            # 這是你原本那份非常專業的 Prompt，建議維持，因為它抓細節很準
-            analysis_prompt = """
-            ### Role
-            You are a Senior Computer Vision Engineer. Your task is to perform a "Geometric Scan" of the uploaded garment image to facilitate a seamless Virtual Try-On (VTO) synthesis.
+        for i, f in enumerate(garment_files):
+            pil_img = Image.open(f).convert("RGB") # 轉 RGB 供分析
+            category = info_list[i].get('clothes_category', 'others')
 
-            ### Task
-            Perform a pixel-level spatial analysis. Identify the EXACT boundaries and material behavior of the garment. 
-
-            ### Output Format (Strict Structural Specification)
-            1. **Spatial Coordinates & Boundaries (Crucial)**:
-               - **Neckline Geometry**: (e.g., Narrow Crew-neck, Off-shoulder, Deep V-plunge. Specify how high or low it sits relative to a standard collarbone.)
-               - **Hemline Termination**: (e.g., Cropped at high-waist, Standard hip-length, Extra-long tunic. Specify the exact vertical cut-off point.)
-               - **Sleeve Termination**: (e.g., Full-length to wrist, Quarter-length to elbow, Cap-sleeve. Does it have a cuff or raw edge?)
-
-            2. **Anatomical Displacement (Volume)**:
-               - **Shoulder Silhouette**: (e.g., Structured padding, Natural drop-shoulder, Raglan seam. Describe the transition from neck to arm.)
-               - **Fit Category**: (e.g., Compression/Skin-tight, Regular, Oversized/Boxy. How much "air gap" exists between the fabric and a standard body?)
-               - **3D Shape**: (Is the garment flat or does it have built-in volume like puff sleeves or a quilted puffer texture?)
-
-            3. **Physical Material Properties**:
-               - **Stiffness & Drape**: (e.g., Rigid canvas, Fluid silk, Weighted fleece. How does the edge of the fabric behave?)
-               - **Surface Micro-detail**: (e.g., 1x1 Ribbed knit, Distressed denim fraying, Matte nylon. Describe the texture grain.)
-               - **Transparency/Opacity**: (100% Opaque, Semi-sheer, or Transparent. Specify if the background/skin would be visible through the weave.)
-
-            4. **High-Contrast Keypoints**:
-               - **Color Fidelity**: (Exact Hex-code or precise shade, including shadow/highlight intensity.)
-               - **Graphic Anchors**: (Describe any logos, patterns, or text. Specify exact size and location using coordinates like "Upper Left Chest" or "Full Frontal Center".)
-               - **Hardware**: (Detail any zippers, buttons, or drawstrings. Are they functional or decorative?)
-
-            ### Constraints (Strict Enforcement)
-            - **Boundary Focus**: Use terms that define where the garment ENDS (e.g., "ends precisely at the wrist bone").
-            - **No Hallucinations**: Only describe the object. Ignore any hangers, labels, or backgrounds.
-            - **VTO Optimized**: Focus on info that helps a model know WHICH skin to cover and WHICH skin to keep.
-            """
-            
-            # 使用顧問模型進行分析 (通常用 Flash 就很快很準)
+            # --- [AI 掃描點] 按照你要求的 config 格式 ---
             response = self.client.models.generate_content(
-                model=self.consultant_model, # 或是 self.model_name
-                contents=[pil_cloth_img, analysis_prompt]
+                model=self.consultant_model,
+                contents=[pil_img, analysis_prompt],
+                config=types.GenerateContentConfig(
+                    response_mime_type="application/json",
+                    temperature=0.1
+                )
             )
             
-            # 取得分析內容，如果失敗則給予預設值
-            description = response.text if response and response.text else "Standard garment"
-            print(f"📝 分析完成。已產出服裝數位藍圖。")
+            # 這份「物理掃描報告」現在包含了材質與透明度數據
+            scan_result = response.text 
+
+            if category in ['pants', 'skirt']:
+                has_bottom = True
             
-            return {
-                "success": True,
-                "description": description,
-                "gemini_consultant": "success"
-            }
+            items.append({
+                "img": pil_img,
+                "cat": category,
+                "rule": info_list[i].get('garment_info', {}),
+                "scan_report": scan_result  # 儲存掃描報告，供 View 包裝或下一步使用
+            })
+            
+        return {"items": items, "has_bottom": has_bottom}, "success"
 
-        except Exception as e:
-            print(f"⚠️ [analyze_garment] 分析出錯: {e}")
-            return {
-                "success": False,
-                "description": "A standard clothing item",
-                "gemini_consultant": "error"
-            }
 
-    # ==========================================
-    # [核心合成] 虛擬試穿 (VFX 生圖引擎)
-    # ==========================================
-
-    def virtual_try_on(self, model_image, garment_image, hex_color, texture_swatch, garment_description, model_info=None, garment_info=None):
-        """
-        針對 Gemini 1.5 Flash 影像模型優化的試穿合成。
-        已移除 DensePose 依賴，直接進行影像合成。
-        """
-        tools_status = {
-            "rembg": "success", 
-            "opencv_smoothing": "success", 
-            "gemini_consultant": "success", 
-            "gemini_model": "running",
-            "densepose": "skipped" # 固定為跳過
-        }
-        
+    # --- [Step 5] 核心合成邏輯 (純邏輯，不存檔) ---
+    def virtual_try_on(self, model_image, garments_ctx, user_data):
         try:
-            if not self.client:
-                return self._build_error_response(500, "Gemini Client 未初始化", tools_status, {})
+            m_info = user_data.get('model_info', {})
+            u_h = m_info.get('user_height', 170.0)
+            u_w = m_info.get('user_waistline', 80.0)
 
-            # 1. 讀取圖片素材 (直接處理傳入的檔案物件)
-            if hasattr(model_image, 'seek'): model_image.seek(0)
-            pil_model = Image.open(model_image).convert("RGB")
-            
-            if hasattr(garment_image, 'seek'): garment_image.seek(0)
-            pil_cloth = Image.open(garment_image).convert("RGB")
-            
-            # --- DensePose 邏輯已註解 ---
-            """
-            pil_densepose = None
-            if densepose_path and os.path.exists(densepose_path):
-                pil_densepose = Image.open(densepose_path).convert("RGB")
-            """
+            # 建立衣服詳細數據字串 (用於填入 Prompt)
+            garment_details = ""
+            for i, item in enumerate(garments_ctx['items']):
+                rule = item['rule']
+                garment_details += f"- Item {i+1} ({item['cat']}): Sleeve {rule.get('clothes_arm_length', 0)}cm, Shoulder {rule.get('clothes_shoulder_width', 0)}cm. "
 
-            # 2. 保存備份 (供後台紀錄或 debug 使用)
-            model_filename, model_save_path = self.get_unique_filename(prefix="model", ext="png")
-            pil_model.save(model_save_path, "PNG")
+            # 你要求的「虛擬繪畫工程師」單一 Prompt
+            final_prompt = (
+                f"### ROLE: You are a Senior Virtual Fashion VFX Engineer. Your mission is precision garment synthesis and pixel-level painting. "
+                f"### GEOMETRIC SCAN PROTOCOL: Perform a spatial analysis of the garment. Identify EXACT boundaries: Neckline Geometry, Sleeve Termination, and Hemline Termination. "
+                f"Analyze Anatomical Displacement (Shoulder Silhouette/Fit Category) and Physical Material Properties (Stiffness/Drape/Surface Grain). "
+                f"### MODEL DATA: Height {u_h}cm, Waistline Level {u_w}cm. "
+                f"### EXECUTION RULES: "
+                f"1. SELECTIVE PAINTING: ONLY modify pixels where garments are applied. KEEP the model's head, hands, feet, and background 100% UNCHANGED. Do NOT paint areas that do not require clothing. "
+                f"2. BOUNDARY LOCK: For tops/outerwear, the hemline MUST end precisely at the {u_w}cm waistline. DO NOT extend fabric; IT IS NOT A DRESS. "
+                f"3. AUTO-COMPLETION: {'NONE.' if garments_ctx['has_bottom'] else 'CRITICAL: No lower-body garment detected; paint plain MATTE BLACK trousers to complete the look.'} "
+                f"4. FIDELITY: Maintain 100% color, texture grain, and graphic anchor (logos/hardware) from the source images. "
+                f"### OUTPUT: A high-resolution, seamless, and photorealistic composite image."
+            )
 
-            # 3. 構建合成指令 (移除 DensePose 相關描述)
-            prompt = f"""
-                ### Core Mission
-                Forcefully transfer the complete garment from [Image 1] onto the model in [Image 2].
+            # 準備所有要傳給 AI 的圖片 (模特兒底圖 + 衣服圖清單)
+            source_images = [item['img'] for item in garments_ctx['items']]
 
-                ### Mandatory Execution Rules
-                1. **Source Integrity**: Maintain 100% of the original color, pattern, texture, and details from [Image 1]. Do NOT change its color.
-                2. **Body Mapping**: Wrap and fit the garment precisely to the model's anatomy in [Image 2]. The neckline, shoulders, chest, and sleeves MUST align perfectly with the model's pose, ensuring a natural 3D draped effect.
-                3. **Zero-Invasive Masking**: Do NOT modify the model's head, hands, feet, skin tone, or any background elements. These must remain 100% unchanged from [Image 2].
-                4. **Physical Occlusion**: If the model's hair or hands are in front of their torso in [Image 2], the transferred garment MUST be rendered behind them.
-
-                ### Final Specification
-                - Output: A realistic, high-definition image of the model wearing the exact garment from [Image 1].
-                - Quality: Clean edges, seamless layering, 4K detail.
-                """
-
-            # 4. 調用生成
-            tryon_filename, tryon_save_path = self.get_unique_filename(prefix="tryon_final", ext="png")
-            
-            # 組合內容：衣服、材質、模特兒、指令
-            contents = [pil_cloth, texture_swatch, pil_model, prompt]
-
+            # 按照你要求的格式回傳 (將圖片與 Prompt 傳進去)
             response = self.client.models.generate_content(
                 model=self.model_name,
-                contents=contents
+                contents=[model_image, *source_images, final_prompt]
             )
-
-            # 5. 存檔邏輯
-            image_saved = False
-            if response and response.candidates and response.candidates[0].content.parts:
-                for part in response.candidates[0].content.parts:
-                    if hasattr(part, 'inline_data') and part.inline_data and part.inline_data.data:
-                        with open(tryon_save_path, 'wb') as f:
-                            f.write(part.inline_data.data)
-                        image_saved = True
-                        break
-                    elif hasattr(part, 'text') and not image_saved:
-                        try:
-                            img_obj = part.as_image()
-                            img_obj.save(tryon_save_path)
-                            image_saved = True
-                            break
-                        except: pass
-
-            if not image_saved:
-                tools_status["gemini_model"] = "fail"
-                return self._build_error_response(422, "合成失敗", tools_status, {})
-
-            tools_status["gemini_model"] = "success"
-            return self._build_success_response(
-                tools_status,
-                model_image_filename=model_filename,
-                tryon_result_filename=tryon_filename,
-                style_analysis={"tech_spec": garment_description, "hex_color": hex_color}
-            )
+            # 取得結果圖片物件
+            try:
+                # 尋找回傳內容中屬於圖片的 Part
+                generated_image_part = next(part for part in response.candidates[0].content.parts if part.inline_data or part.blob)
+                image_bytes = generated_image_part.inline_data.data if generated_image_part.inline_data else generated_image_part.blob.data
+                result_pil = Image.open(io.BytesIO(image_bytes))
+            except StopIteration:
+                logger.error("❌ Gemini 回傳內容中未找到圖片數據")
+                # 備援方案：回傳原圖或報錯
+                result_pil = model_image 
+            
+            return {
+                "success": True, 
+                "result_image": result_pil, 
+                "status": "success"
+            }
 
         except Exception as e:
-            logger.error(f"❌ 試穿合成過程出錯: {str(e)}")
-            return self._build_error_response(500, f"內部異常: {str(e)}", tools_status, {"detail": str(e)})
-        
+            return {"success": False, "status": "fail", "message": str(e)}
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
     def generate_densepose(self, input_image_path):
         """
         [實戰成功版] 姿態提取工具 - 整合動態解包防呆機制與純淨 IUV 渲染。
