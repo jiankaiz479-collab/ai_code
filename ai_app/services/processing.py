@@ -3,6 +3,7 @@ import io
 import uuid
 import logging
 import json
+import torch
 import numpy as np
 import cv2  
 from rembg import new_session
@@ -405,114 +406,110 @@ class AIProcessor(ImageProcessingInterface):
     
     
     
-    
-    
-    
-    
-    
-    
-    def generate_densepose(self, input_image_path):
+    def generate_densepose(self, model_image_path):
         """
-        [實戰成功版] 姿態提取工具 - 整合動態解包防呆機制與純淨 IUV 渲染。
+        [輔助工具] 姿態提取工具 - 專為 detectron2 v0.6 與 Gemini 視覺約束優化
+        包含動態解包防呆機制與純淨 IUV 渲染。
         """
-        logger.info(f"🧠 [DensePose] 啟動成功版幾何掃描: {input_image_path}")
         try:
-            import cv2
-            import torch
-            import numpy as np
-            from PIL import Image
+            # 1. 自動尋找 detectron2 套件位置推算路徑
             import detectron2
-            from detectron2.config import get_cfg
-            from detectron2.engine import DefaultPredictor
-            from densepose import add_densepose_config
-            from densepose.vis.extractor import DensePoseResultExtractor
-            from densepose.vis.densepose_results import DensePoseResultsFineSegmentationVisualizer
-
-            # 1. 自動定位路徑
             d2_pkg_path = os.path.dirname(detectron2.__file__)
             calculated_densepose_path = os.path.join(os.path.dirname(d2_pkg_path), 'projects', 'DensePose')
+            
             if not os.path.exists(calculated_densepose_path):
                 calculated_densepose_path = "/app/detectron2/projects/DensePose"
 
             _, pose_map_path = self.get_unique_filename(prefix="pose_map", ext="png")
 
-            # 2. 初始化 Predictor (使用單例模式避免重複載入權重)
+            # 2. 初始化 DensePose Predictor
             if not hasattr(self, '_densepose_predictor'):
+                from detectron2.config import get_cfg
+                from detectron2.engine import DefaultPredictor
+                from densepose import add_densepose_config
+
                 cfg = get_cfg()
                 add_densepose_config(cfg)
                 
-                cfg_path = os.path.join(calculated_densepose_path, "configs/densepose_rcnn_R_50_FPN_s1x.yaml")
-                weights_path = "/app/densepose_assets/model_final_162be9.pkl" # 這裡指向你 Docker 的位置
+                cfg_path = os.getenv("DENSEPOSE_CFG", "").strip()
+                if not cfg_path:
+                    cfg_path = os.path.join(calculated_densepose_path, "configs/densepose_rcnn_R_50_FPN_s1x.yaml")
+                
+                weights_path = os.getenv("DENSEPOSE_WEIGHTS", "").strip()
+                if weights_path and weights_path.startswith('http'):
+                    weights_local = "/tmp/densepose_weights.pkl"
+                    if not os.path.exists(weights_local):
+                        import urllib.request
+                        urllib.request.urlretrieve(weights_path, weights_local)
+                    weights_path = weights_local
                 
                 cfg.merge_from_file(cfg_path)
-                cfg.MODEL.WEIGHTS = weights_path
-                cfg.MODEL.DEVICE = "cpu"
+                if weights_path:
+                    cfg.MODEL.WEIGHTS = weights_path
+                cfg.MODEL.DEVICE = os.getenv("DENSEPOSE_DEVICE", "cpu")
+                
+                # 💡 增加信心分數門檻，過濾雜訊，防止抓到錯誤的微小特徵
                 cfg.MODEL.ROI_HEADS.SCORE_THRESH_TEST = 0.5 
                 
                 self._densepose_predictor = DefaultPredictor(cfg)
+            
 
-            # 3. 讀取與推理
-            img = cv2.imread(input_image_path)
+            
+            img = cv2.imread(model_image_path)
             if img is None:
-                return {"success": False, "error": "無法讀取模特兒圖片"}
+                return None, False, "無法讀取模特兒圖片"
             
             with torch.no_grad():
                 outputs = self._densepose_predictor(img)
             
+            # 4. 檢查結果
             if "instances" not in outputs:
-                return {"success": False, "error": "DensePose 輸出格式異常"}
-            
+                return None, False, "DensePose 輸出格式異常"
             instances = outputs["instances"].to("cpu")
             if len(instances) == 0:
-                return {"success": False, "error": "DensePose 未檢測到人體"}
-            
+                return None, False, "DensePose 未檢測到人體"
             if not instances.has("pred_densepose"):
-                return {"success": False, "error": "無法從影像中提取姿態特徵"}
+                return None, False, "無法從影像中提取姿態特徵"
 
-            # 4. 提取結果並繪圖 (動態解包防呆)
+            # ==========================================
+            # 5. 提取結果並繪圖 (終極解法：動態解包與純淨渲染)
+            # ==========================================
+            from densepose.vis.extractor import DensePoseResultExtractor
+            from densepose.vis.densepose_results import DensePoseResultsFineSegmentationVisualizer
+            
+            # A. 使用官方 Extractor 解析原始特徵 (將 GPU 裸訊號解碼)
             extractor = DensePoseResultExtractor()
             extracted_data = extractor(instances)
             
-            # 🛡️ 處理不同版本 API 回傳變數數量不一致
+            # B. 動態解包 (Dynamic Unpacking) 🛡️ 防呆機制
+            # 解決 detectron2 不同版本 API 回傳變數數量不一致的致命痛點
             if len(extracted_data) == 3:
-                boxes, scores, dp_results = extracted_data
+                boxes, scores, dp_results = extracted_data  # 某些版本回傳 3 個參數
             elif len(extracted_data) == 2:
-                boxes, dp_results = extracted_data
+                boxes, dp_results = extracted_data          # 某些版本回傳 2 個參數
             else:
-                return {"success": False, "error": f"未知特徵格式: {len(extracted_data)}"}
+                return None, False, f"未知的 DensePose 特徵格式: 預期 2 或 3 個變數，卻收到 {len(extracted_data)} 個"
             
+            # C. 強制重新打包為嚴格的 2 元組格式 (Tuple)
             formatted_data = (boxes, dp_results)
             
-            # 5. 純淨渲染 (拔除 Bounding Box 外框，專供 Gemini 作為邊界約束圖)
+            # D. 啟動純淨渲染 (拔除 Bounding Box 外框，專供 Gemini 作為邊界約束圖)
             visualizer = DensePoseResultsFineSegmentationVisualizer()
             blank_bg = np.zeros(img.shape, dtype=np.uint8)
             vis_img = visualizer.visualize(blank_bg, formatted_data)
+            # ==========================================
 
             # 6. 儲存圖片
+            from PIL import Image
             Image.fromarray(cv2.cvtColor(vis_img, cv2.COLOR_BGR2RGB)).save(pose_map_path, "PNG")
             logger.info(f"✅ DensePose 成功產出純淨版 Pose Map: {pose_map_path}")
             
-            return {"success": True, "densepose_path": pose_map_path}
-
+            return pose_map_path, True, None
+            
         except Exception as e:
-            logger.error(f"❌ DensePose 嚴重報錯: {str(e)}")
+            logger.error(f"❌ DensePose 報錯: {str(e)}")
             import traceback
             logger.error(traceback.format_exc())
-            return {"success": False, "error": str(e)}
-
-
-
-    def _visualize_iuv(self, labels, uv):
-        """ 核心渲染：確保 IUV 數值轉換為可見的 RGB 範圍 """
-        import numpy as np
-        h, w = labels.shape
-        vis = np.zeros((h, w, 3), dtype=np.uint8)
-        
-        # R 通道：人體部位標籤 (1-24)，放大倍數讓顏色變明顯
-        vis[:, :, 0] = (labels.astype(float) / 24.0 * 255.0).astype(np.uint8)
-        # G 通道：U 座標 (0-1)
-        vis[:, :, 1] = (uv[0, :, :] * 255.0).astype(np.uint8)
-        # B 通道：V 座標 (0-1)
-        vis[:, :, 2] = (uv[1, :, :] * 255.0).astype(np.uint8)
-        
-        return vis
+            return None, False, f"DensePose 執行失敗: {str(e)}"
+    
+    
