@@ -84,13 +84,6 @@ class RemoveBgView(View):
             # 任何未預期的崩潰統一噴 1500 (系統基礎錯誤)
             return JsonResponse({"code": 500, "message": "1500", "debug": str(e)}, status=500)
 
-
-
-
-
-
-
-
 # ==========================================
 # 2. 虛擬試穿 (Virtual Try-On)
 # 此 View 負責接收模特兒與衣服，執行合成任務
@@ -219,3 +212,8 @@ class TryCombineView(View):
                 "message": "2501",
                 "debug_info": {"suggest": f"系統發生非預期錯誤: {str(e)}"}
             }, status=500)
+        
+
+
+
+

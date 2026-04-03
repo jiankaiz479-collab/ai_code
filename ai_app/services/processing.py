@@ -333,32 +333,53 @@ class AIProcessor(ImageProcessingInterface):
 
             # --- [5. 後處理：二次去背與重新置中佈局] ---
             try:
-                # 使用 rembg 進行二次去背，取得透明人像
+                # ==========================================
+                # (原本代碼) 去背處理
+                # ==========================================
                 processed_png, success, _, _ = self.remove_background(result_pil)
                 if not success:
+                    # 如果失敗，強制轉為 RGBA 模式
                     processed_png = result_pil.convert("RGBA")
 
-                # 創建純白滿版畫布
+                # ==========================================
+                # 【改動重點】創建純透明滿版畫布 (保留 canvas 變數名)
+                # ==========================================
+                # 取得原始圖片尺寸
                 orig_w, orig_h = result_pil.size
-                canvas = Image.new("RGB", (orig_w, orig_h), (255, 255, 255))
 
-                # 計算置中與底部預留白邊 (Padding)
+                # 【關鍵修改】：
+                # 原本是：Image.new("RGB", (orig_w, orig_h), (255, 255, 255)) -> 純白 RGB
+                # 現在改為：模式 "RGBA"，底色 (0, 0, 0, 0) -> 純透明 RGBA
+                canvas = Image.new("RGBA", (orig_w, orig_h), (0, 0, 0, 0))
+
+                # ==========================================
+                # (原本代碼) 計算置中與底部預留白邊 ( Padding參數均未更動)
+                # ==========================================
+                # 取得去背圖的邊框信息 (PIL能自動判別 alpha 通道)
                 bbox = processed_png.getbbox()
+
                 if bbox:
+                    # 裁切出乾淨的人像部分
                     person_img = processed_png.crop(bbox)
                     p_w, p_h = person_img.size
                     
-                    # 水平置中
+                    # 水平置中 (計算 paste_x)
                     paste_x = (orig_w - p_w) // 2
                     
-                    # 底部預留 10% 的畫布高度作為白邊
+                    # 底部預留 10% 的畫布高度作為白邊 (計算 bottom_padding)
                     bottom_padding = int(orig_h * 0.1)
+                    
+                    # 計算貼上的 Y 座標 (paste_y)
                     paste_y = orig_h - p_h - bottom_padding
                     
                     # 頂部安全檢查
                     if paste_y < 0: paste_y = 10
                     
+                    # 【執行貼上】：
+                    # 貼上透明畫布。第三個參數 person_img 是遮罩，確保透明區塊正確融合。
                     canvas.paste(person_img, (paste_x, paste_y), person_img)
+                    
+                    # final_output 現在是一個具備正確人體置中比例，且背景純透明的 RGBA 圖片。
                     final_output = canvas
                 else:
                     final_output = result_pil
