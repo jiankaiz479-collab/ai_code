@@ -1,20 +1,119 @@
 import os
 import io
-import uuid
+import sys
+import inspect
 import logging
+
+# ==========================================================
+# 🚀 救命神機 第一區：環境變數與 Python 底層修補
+# ==========================================================
+
+# 1. 強制鎖定 Headless 平台 (無螢幕環境渲染必備)
+os.environ['PYOPENGL_PLATFORM'] = 'egl'
+
+# 2. 修復 Python 3.11+ 移除 inspect.getargspec 的問題
+if not hasattr(inspect, 'getargspec'):
+    inspect.getargspec = inspect.getfullargspec
+
+# ==========================================================
+# 🚀 救命神機 第二區：Numpy 相容性大滿貫 (解決 chumpy 噴錯)
+# ==========================================================
+import numpy as np
+
+# 這些是為了讓老舊的 chumpy 套件在 Numpy 1.24+ / 2.0 環境下存活
+# chumpy 啟動時會執行: from numpy import bool, int, float, complex, object, unicode, str
+def patch_numpy_for_legacy():
+    patches = {
+        'bool': bool,
+        'int': int,
+        'float': float,
+        'complex': complex,
+        'object': object,
+        'unicode': str,  # ✨ 解決這次報錯的主角
+        'str': str,      # ✨ 預防下一個可能出現的報錯
+    }
+    for name, obj in patches.items():
+        if not hasattr(np, name):
+            setattr(np, name, obj)
+    
+    if not hasattr(np, 'typeDict'):
+        np.typeDict = np.sctypes
+
+patch_numpy_for_legacy()
+
+# ==========================================================
+# 🚀 救命神機 第三區：OpenGL 雜湊與 Headless 修補
+# ==========================================================
+# ==========================================================
+# 🚀 救命神機 第三區：OpenGL 雜湊與 Headless 修補 (更新版)
+# ==========================================================
+try:
+    import OpenGL
+    from OpenGL import contextdata
+
+    # 1. 攔截 getValue 邏輯
+    _old_getValue = contextdata.getValue
+    def _new_getValue(key, context=None, **kwargs): # 👈 加上 **kwargs 接收額外參數
+        try:
+            return _old_getValue(key, context, **kwargs)
+        except TypeError:
+            # 當 context 是不可雜湊的 numpy array 時，轉成 id
+            return _old_getValue(key, id(context) if context is not None else None, **kwargs)
+    contextdata.getValue = _new_getValue
+
+    # 2. 攔截 setValue 邏輯
+    _old_setValue = contextdata.setValue
+    def _new_setValue(key, value, context=None, **kwargs): # 👈 加上 **kwargs 解決 'weak' 報錯
+        try:
+            return _old_setValue(key, value, context, **kwargs)
+        except TypeError:
+            # 同步處理雜湊問題
+            return _old_setValue(key, value, id(context) if context is not None else None, **kwargs)
+    contextdata.setValue = _new_setValue
+
+    # 關閉錯誤檢查，避開更多 Headless 環境下的檢查 Bug
+    OpenGL.ERROR_CHECKING = False
+except Exception as e:
+    logger.warning(f"OpenGL 補丁套用失敗，但可能不影響基本功能: {e}")
+
+# ==========================================================
+# 🚀 第四區：核心 AI 與 3D 重建庫 (必須在修補後匯入)
+# ==========================================================
+import trimesh
+import pyrender
+import smplx
+import chumpy  # 👈 現在匯入它，它會以為 Numpy 還是 2014 年的樣子
+# ==========================================================
+# 🚀 第五區：Django、RemBG 與其他標準庫
+# ==========================================================
+# ==========================================================
+# 🚀 第五區：Django、RemBG 與其他標準庫 (更新版)
+# ==========================================================
+import uuid
 import json
 import torch
-import numpy as np
-import cv2  
-from rembg import new_session
-from django.conf import settings
-from .interfaces import ImageProcessingInterface
-from rembg import remove, new_session
+import cv2
+import imageio  # 👈 補上這行，解決這次報錯的主角
 from PIL import Image, ImageEnhance
+from django.conf import settings
+from rembg import remove, new_session
 from google import genai
 from google.genai import types
+
+from .interfaces import ImageProcessingInterface
+
 # 設定日誌記錄器
 logger = logging.getLogger(__name__)
+
+# 設定日誌記錄器
+logger = logging.getLogger(__name__)
+
+
+
+
+
+
+
 
 class AIProcessor(ImageProcessingInterface):
     """
@@ -511,5 +610,95 @@ class AIProcessor(ImageProcessingInterface):
             import traceback
             logger.error(traceback.format_exc())
             return None, False, f"DensePose 執行失敗: {str(e)}"
-    
-    
+        
+
+
+
+
+    def reconstruct_3d(self, model_image_path, model_info):
+        """
+        [3D 重建核心] 
+        僅負責計算 SMPL 頂點與渲染影格，將影格列表回傳給 View。
+        """
+        import smplx
+        import torch
+        import trimesh
+        import pyrender
+        import numpy as np
+
+        try:
+            # 1. 解析參數
+            height_cm = float(model_info.get('user_height', 170.0))
+            weight_kg = float(model_info.get('user_weight', 70.0))
+            waist_cm = float(model_info.get('user_waistline', 80.0))
+
+            # 2. 建立 SMPL 模型與體型
+            print("開始建立SMPL....")
+            # Resolve SMPL model directory with local fallback.
+            primary_smpl_model_dir = os.getenv("SMPL_MODEL_DIR", "/app/smpl_assets")
+            fallback_smpl_model_dir = os.path.join(settings.BASE_DIR, "smpl_assets")
+            if os.path.exists(primary_smpl_model_dir):
+                smpl_model_dir = primary_smpl_model_dir
+                logger.info("Using SMPL model directory: %s", smpl_model_dir)
+            elif os.path.exists(fallback_smpl_model_dir):
+                smpl_model_dir = fallback_smpl_model_dir
+                logger.info(
+                    "Primary SMPL model directory not found (%s); using fallback: %s",
+                    primary_smpl_model_dir,
+                    smpl_model_dir,
+                )
+            else:
+                raise FileNotFoundError(
+                    "SMPL model directory not found. Checked primary path "
+                    f"'{primary_smpl_model_dir}' and fallback path "
+                    f"'{fallback_smpl_model_dir}'. "
+                    "Set SMPL_MODEL_DIR or place assets under BASE_DIR/smpl_assets/smpl."
+                )
+            # Build SMPL model
+            model = smplx.create(smpl_model_dir, model_type="smpl", gender="neutral")
+            betas = torch.zeros([1, 10])
+            betas[0, 0] = (weight_kg - 70.0) * 0.2
+            betas[0, 1] = (waist_cm - 80.0) * 0.15
+            print("開始建立SMPL  7")
+            # 3. 生成頂點與縮放
+            output = model(betas=betas, return_verts=True)
+            vertices = output.vertices[0].detach().cpu().numpy()
+            scale = height_cm / 170.0
+            vertices *= scale
+
+            # 4. 建立渲染場景
+            R_init = trimesh.transformations.rotation_matrix(np.radians(180), [0, 1, 0])
+            human_mesh = trimesh.Trimesh(vertices, model.faces)
+            human_mesh.apply_transform(R_init)
+
+            scene = pyrender.Scene(bg_color=[0.1, 0.1, 0.1])
+            material = pyrender.MetallicRoughnessMaterial(baseColorFactor=[0.8, 0.8, 0.8, 1.0], metallicFactor=0.3)
+            primitive = pyrender.Primitive(positions=human_mesh.vertices.astype(np.float32), 
+                                         indices=human_mesh.faces.astype(np.uint32), material=material)
+            mesh_node = scene.add(pyrender.Mesh(primitives=[primitive]))
+            
+            light = pyrender.DirectionalLight(color=[1.0, 1.0, 1.0], intensity=5.0)
+            scene.add(light, pose=trimesh.transformations.translation_matrix([0, 2, 2]))
+
+            # 5. 渲染影格 (不存檔，存進 list)
+            frames = []
+            r = pyrender.OffscreenRenderer(512, 512)
+            steps = 20 
+            radius = 3.2 * scale 
+            
+            for i in range(steps):
+                angle = (i / steps) * (2 * np.pi)
+                scene.set_pose(mesh_node, pose=trimesh.transformations.rotation_matrix(angle, [0, 1, 0]))
+                static_cam_pose = trimesh.transformations.translation_matrix([0, 0.2, radius])
+                cam_node = scene.add(pyrender.PerspectiveCamera(yfov=np.pi/3.0), pose=static_cam_pose)
+                
+                color, _ = r.render(scene)
+                frames.append(color)
+                scene.remove_node(cam_node)
+
+            r.delete()
+            # 🚀 回傳影格列表
+            return frames, True, "成功"
+            
+        except Exception as e:
+            return None, False, f"3D 重建計算失敗: {str(e)}"
