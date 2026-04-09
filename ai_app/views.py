@@ -169,21 +169,40 @@ class TryCombineView(View):
                 }, status=422 if error_code == 2422 else 500)
 
             # ========== 步驟 6: 存檔與 Multipart 封裝 ==========
+           # ========== 步驟 6: 存檔 ==========
             final_image = result.get('result_image') 
             file_name, file_path = processor.get_unique_filename(prefix="processed", ext="png")
             final_image.save(file_path, "PNG")
 
-            # 構建成功回覆的 JSON
+            # ========== 步驟 7: 合成後的風格分析 ==========
+            # 呼叫函式，這時如果出錯 code 會是 "2504"
+            # 1. 執行分析
+            style_result, outfit_success, outfit_code, outfit_err = processor.analyze_clothing_style(final_image, mode="outfit")
+
+            # 2. 處理 style_name (確保拿到的是整個列表)
+            if outfit_success:
+                # 這裡的 style_result 內容現在只有 {"style_name": [...]}
+                main_style = style_result.get("style_name", ["Casual"])
+            else:
+                # 如果分析失敗 (2504)，給一個標示失敗的列表
+                main_style = ["Unknown"]
+
+            # 3. 放入 JSON 回傳
             analysis_data = {
                 "code": 200,
                 "message": "2200", 
                 "data": {
                     "file_name": file_name,
-                    "file_format": "PNG",
-                    "items_processed": len(garment_images)
+                    "style_name": main_style,
+                    "file_format": "PNG"
                 }
             }
-
+            # 如果分析失敗 (outfit_success 為 False)，將 2504 放入 debug_info
+            if not outfit_success:
+                analysis_data["debug_info"] = {
+                    "suggest": f"穿搭風格分析失敗 (錯誤碼: {outfit_code})",
+                    "error_detail": outfit_err
+                }
             # 構建 Multipart/mixed 響應
             boundary = 'frame_boundary'
             response_body = []

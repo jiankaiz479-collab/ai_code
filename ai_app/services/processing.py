@@ -225,42 +225,66 @@ class AIProcessor(ImageProcessingInterface):
             return False, 0, "1422", f"清晰度運算崩潰: {str(e)}"
         
 
-    def analyze_clothing_style(self, image_path):
+    def analyze_clothing_style(self, image_input, mode="item"):
         """
-        利用 Gemini 分析服裝類別、風格標籤與主色。 (狀態碼: 1501)
+        利用 Gemini 分析服裝類別、風格標籤與主色。
+        單品分析失敗狀態碼: 1501
+        合成穿搭分析失敗狀態碼: 2504
         """
         if not self.client:
-            logger.warning("Gemini Client 未初始化")
-            return None, False, "1501", "Gemini API Client not initialized"
+            # 根據模式決定 Client 未初始化的錯誤碼
+            err_code = "2504" if mode == "outfit" else "1501"
+            logger.warning(f"Gemini Client 未初始化 (模式: {mode})")
+            return None, False, err_code, "Gemini API Client not initialized"
         
         try:
-            pil_img = Image.open(image_path)
-            # --- Prompt 保持原樣 ---
-            prompt = """
-                Analyze the clothing item in this image. Provide the analysis in English and return ONLY a JSON object.
+            # 讓函式相容路徑字串或 PIL Image 物件
+            if isinstance(image_input, str):
+                pil_img = Image.open(image_input)
+            else:
+                pil_img = image_input
 
-                【STRICT CATEGORY RULE】:
-                You MUST choose EXACTLY one category from this list:
-                - "clothing": All tops (T-shirts, blouses, sweaters, hoodies, long/short sleeves).
-                - "pants": All trousers and shorts (jeans, leggings, sweatpants).
-                - "outerwear": Jackets, coats, blazers, vests.
-                - "intimates": Underwear, bras, sleepwear.
-                - "skirt": All types of skirts (mini, midi, maxi).
-                - "others": Dresses, accessories, or items not fitting above.
+            # 使用 if/else 根據模式切換 Prompt
+            if mode == "outfit":
+              prompt = """
+                Analyze the OVERALL COORDINATION in this image. 
+                Identify the fashion aesthetic/genre. 
+                Return ONLY a JSON object.
 
-                【PURE AESTHETIC STYLE RULE】:
-                - "style_name": Identify the fashion aesthetic or genre (e.g., Casual, Formal, Sporty, Streetwear, Vintage, Korean Style, Japanese Style, Preppy, Sweet, Sexy, Minimalist).
-                - Min 3 tags. DO NOT include physical descriptions like "oversized", "slim-fit", or "long-sleeve".
+                【TARGET AESTHETICS】:
+                Focus on categories such as: 
+                - Streetwear (街頭), Minimalist (極簡), Vintage (復古), Korean Style (韓系), 
+                - Japanese Style (日系), Preppy (學院風), Casual (休閒), Formal (正式), 
+                - Sporty (運動), Techwear (機能風).
 
-                【COLOR RULE】:
-                - "color_name": List up to 3 dominant color names in English (e.g., Red, Blue, Black, White, Gray).
+                【STRICT RULES】:
+                1. DO NOT use gendered words (e.g., Feminine, Masculine, Girly).
+                2. DO NOT use physical descriptions (e.g., Long-sleeve, Cotton, Slim).
+                3. Return 3-5 tags that best describe the vibe.
 
                 JSON Structure:
                 {
-                "clothes_category": "Selected Category",
-                "style_name": ["Style1", "Style2", ...],
-                "color_name": ["Color1", "Color2", ...]
+                "style_name": ["Style1", "Style2", ...]
                 }
+            """
+            else:
+                prompt = """
+                    Analyze the clothing item in this image. Provide the analysis in English and return ONLY a JSON object.
+                    【STRICT CATEGORY RULE】:
+                    You MUST choose EXACTLY one category from this list:
+                    - "clothing", "pants", "outerwear", "intimates", "skirt", "others".
+                    【PURE AESTHETIC STYLE RULE】:
+                    - "style_name": Identify the fashion aesthetic or genre.
+                    - Min 3 tags. DO NOT include physical descriptions.
+                    【COLOR RULE】:
+                    - "color_name": List up to 3 dominant color names in English.
+
+                    JSON Structure:
+                    {
+                    "clothes_category": "Selected Category",
+                    "style_name": ["Style1", "Style2", ...],
+                    "color_name": ["Color1", "Color2", ...]
+                    }
                 """
             
             response = self.client.models.generate_content(
@@ -272,23 +296,37 @@ class AIProcessor(ImageProcessingInterface):
                 )
             )
             
+            # 解析 JSON 結果
             result = json.loads(response.text)
-            style_analysis = {
-                "clothes_category": result.get("clothes_category", "others"),
-                "style_name": result.get("style_name", []),
-                "color_name": result.get("color_name", [])
-            }
             
-            logger.info(f"✅ Gemini 風格分析成功: {style_analysis}")
-            # 成功回傳碼對齊 1200
+            # 根據模式決定回傳的字典內容
+            if mode == "outfit":
+                # 合成模式：只回傳風格名稱列表
+                style_analysis = {
+                    "style_name": result.get("style_name")
+                }
+            else:
+                # 單品模式：維持原本三個欄位都回傳
+                style_analysis = {
+                    "clothes_category": result.get("clothes_category"),
+                    "style_name": result.get("style_name"),
+                    "color_name": result.get("color_name")
+                }
+                
+            logger.info(f"✅ Gemini 風格分析成功 ({mode}): {style_analysis}")
+            return style_analysis, True, "1200", None
+                
+            logger.info(f"✅ Gemini 風格分析成功 ({mode}): {style_analysis}")
+            # 成功狀態碼統一使用 1200
             return style_analysis, True, "1200", None
             
         except Exception as e:
             error_msg = str(e) if str(e) else "Unknown Gemini API error"
-            # 失敗碼修正為 1501
-            logger.warning(f"❌ [1501] Gemini 風格分析失敗: {error_msg}")
-            return None, False, "1501", error_msg
-
+            # 關鍵修改：根據模式回傳不同的失敗狀態碼
+            fail_code = "2504" if mode == "outfit" else "1501"
+            
+            logger.warning(f"❌ [{fail_code}] Gemini 風格分析失敗 ({mode}): {error_msg}")
+            return None, False, fail_code, error_msg
     #--------------------------------------------------------------------------------------------------------------
     #--------------------------------------------------------------------------------------------------------------
     #虛擬試穿
