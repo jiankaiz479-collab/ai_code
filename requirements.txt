@@ -7,7 +7,7 @@ google-genai>=1.0
 rembg[cpu]>=2.0
 pillow>=10.0
 opencv-python-headless>=4.8
-numpy>=1.26,<3.0
+numpy>=1.23.5,<2.0
 scipy>=1.11
 
 # --- DensePose / Detectron2 核心依賴 (從 Dockerfile 移入) ---
@@ -26,3 +26,11 @@ av>=12.0
 
 # --- 網路工具 ---
 requests>=2.31
+
+pyrender
+trimesh
+smplx
+chumpy
+imageio
+PyOpenGL
+PyOpenGL-accelerate
