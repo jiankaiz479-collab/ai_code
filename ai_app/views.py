@@ -297,3 +297,77 @@ class Reconstruct_3D(View):
             import traceback
             print(traceback.format_exc(), flush=True)
             return JsonResponse({"code": 500, "message": 3500, "detail": str(e)}, status=500)
+        
+
+@method_decorator(csrf_exempt, name='dispatch')
+class SMPLReconstructView(View):
+    def post(self, request, *args, **kwargs):
+        # ========== 步驟 1: 接收圖片 (對應 3400) ==========
+        model_image = request.FILES.get('model_image')
+        
+        if not model_image:
+            return JsonResponse({
+                "code": 400,
+                "message": "3400",
+                "debug_info": {"error_detail": "Missing model_image file."}
+            }, status=400)
+
+        try:
+            processor = AIProcessor()
+            model_image.seek(0)
+            pil_img = Image.open(model_image).convert("RGB")
+
+            # ========== 步驟 2: 執行 2D 去背 ==========
+            # result 字典應包含 'processed_image' (去背後的 PIL Image)
+            # status 用於判斷人物是否完整
+            result, status = processor.remove_background_2d(pil_img)
+
+            # ========== 步驟 3: 肢體不全錯誤處理 (對應 3422) ==========
+            if status == "incomplete_body":
+                return JsonResponse({
+                    "code": 422,
+                    "message": "3422",
+                    "debug_info": {
+                        "error_detail": "Please ensure your full body and all limbs are visible in the photo."
+                    }
+                }, status=422)
+
+            # ========== 步驟 4: 存檔與回傳 (對應 3200) ==========
+            final_image = result.get('processed_image')
+            # 檔名改為 modules 前綴
+            file_name, file_path = processor.get_unique_filename(prefix="modules", ext="png")
+            final_image.save(file_path, "PNG")
+
+            analysis_data = {
+                "code": 200,
+                "message": "3200",
+                "data": {
+                    "file_name": file_name,
+                    "file_format": "PNG"
+                }
+            }
+
+            # 構建 Multipart/mixed 響應
+            boundary = 'frame_boundary'
+            response_body = []
+            response_body.append(f'--{boundary}\r\nContent-Type: application/json\r\n\r\n'.encode('utf-8'))
+            response_body.append(json.dumps(analysis_data, indent=2).encode('utf-8'))
+            response_body.append(b'\r\n')
+            response_body.append(f'--{boundary}\r\nContent-Type: image/png\r\n'.encode('utf-8'))
+            response_body.append(f'Content-Disposition: attachment; filename="{file_name}"\r\n\r\n'.encode('utf-8'))
+            
+            with open(file_path, 'rb') as f:
+                response_body.append(f.read())
+            
+            response_body.append(b'\r\n')
+            response_body.append(f'--{boundary}--\r\n'.encode('utf-8'))
+
+            return HttpResponse(b''.join(response_body), content_type=f'multipart/mixed; boundary={boundary}')
+
+        except Exception as e:
+            # 系統崩潰處理 (對應 3500)
+            return JsonResponse({
+                "code": 500,
+                "message": "3500",
+                "debug_info": {"error_detail": f"Server crash or heavy load: {str(e)}"}
+            }, status=500)        

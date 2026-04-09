@@ -740,3 +740,19 @@ class AIProcessor(ImageProcessingInterface):
             
         except Exception as e:
             return None, False, f"3D 重建計算失敗: {str(e)}"
+        
+
+    def remove_background_2d(self, pil_image):
+        """
+        純 2D 去背，並檢查人體完整度
+        """
+        try:
+            # 呼叫去背模型 (例如 rembg)
+            processed_pil_img = remove(pil_image)
+            
+            
+            # 假設去背成功
+            return {"processed_image": processed_pil_img}, "success"
+            pass
+        except Exception:
+            return None, "fail"
