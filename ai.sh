@@ -5,8 +5,8 @@ set -euo pipefail
 # ai_code Django 應用啟動腳本 (V4.0 純 Docker 自動化版)
 ################################################################################
 
-APP_IMAGE="${APP_IMAGE:-ai_code_app}"
-CONTAINER_NAME="${CONTAINER_NAME:-ai_container}"
+APP_IMAGE="${APP_IMAGE:-ai-code-app}"
+CONTAINER_NAME="${CONTAINER_NAME:-ai-container}"
 RUN_PORT="${RUN_PORT:-8002}"
 
 # 本地資產路徑 (掛載用)
