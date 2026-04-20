@@ -1,99 +1,12 @@
 import os
 import io
 import sys
-import inspect
 import logging
-
-# ==========================================================
-# 🚀 救命神機 第一區：環境變數與 Python 底層修補
-# ==========================================================
-
-# 1. 強制鎖定 Headless 平台 (無螢幕環境渲染必備)
-os.environ['PYOPENGL_PLATFORM'] = 'egl'
-
-# 2. 修復 Python 3.11+ 移除 inspect.getargspec 的問題
-if not hasattr(inspect, 'getargspec'):
-    inspect.getargspec = inspect.getfullargspec
-
-# ==========================================================
-# 🚀 救命神機 第二區：Numpy 相容性大滿貫 (解決 chumpy 噴錯)
-# ==========================================================
-import numpy as np
-
-# 這些是為了讓老舊的 chumpy 套件在 Numpy 1.24+ / 2.0 環境下存活
-# chumpy 啟動時會執行: from numpy import bool, int, float, complex, object, unicode, str
-def patch_numpy_for_legacy():
-    patches = {
-        'bool': bool,
-        'int': int,
-        'float': float,
-        'complex': complex,
-        'object': object,
-        'unicode': str,  # ✨ 解決這次報錯的主角
-        'str': str,      # ✨ 預防下一個可能出現的報錯
-    }
-    for name, obj in patches.items():
-        if not hasattr(np, name):
-            setattr(np, name, obj)
-    
-    if not hasattr(np, 'typeDict'):
-        np.typeDict = np.sctypes
-
-patch_numpy_for_legacy()
-
-# ==========================================================
-# 🚀 救命神機 第三區：OpenGL 雜湊與 Headless 修補
-# ==========================================================
-# ==========================================================
-# 🚀 救命神機 第三區：OpenGL 雜湊與 Headless 修補 (更新版)
-# ==========================================================
-try:
-    import OpenGL
-    from OpenGL import contextdata
-
-    # 1. 攔截 getValue 邏輯
-    _old_getValue = contextdata.getValue
-    def _new_getValue(key, context=None, **kwargs): # 👈 加上 **kwargs 接收額外參數
-        try:
-            return _old_getValue(key, context, **kwargs)
-        except TypeError:
-            # 當 context 是不可雜湊的 numpy array 時，轉成 id
-            return _old_getValue(key, id(context) if context is not None else None, **kwargs)
-    contextdata.getValue = _new_getValue
-
-    # 2. 攔截 setValue 邏輯
-    _old_setValue = contextdata.setValue
-    def _new_setValue(key, value, context=None, **kwargs): # 👈 加上 **kwargs 解決 'weak' 報錯
-        try:
-            return _old_setValue(key, value, context, **kwargs)
-        except TypeError:
-            # 同步處理雜湊問題
-            return _old_setValue(key, value, id(context) if context is not None else None, **kwargs)
-    contextdata.setValue = _new_setValue
-
-    # 關閉錯誤檢查，避開更多 Headless 環境下的檢查 Bug
-    OpenGL.ERROR_CHECKING = False
-except Exception as e:
-    logger.warning(f"OpenGL 補丁套用失敗，但可能不影響基本功能: {e}")
-
-# ==========================================================
-# 🚀 第四區：核心 AI 與 3D 重建庫 (必須在修補後匯入)
-# ==========================================================
-import trimesh
-import pyrender
-import smplx
-import chumpy  # 👈 現在匯入它，它會以為 Numpy 還是 2014 年的樣子
-# ==========================================================
-# 🚀 第五區：Django、RemBG 與其他標準庫
-# ==========================================================
-# ==========================================================
-# 🚀 第五區：Django、RemBG 與其他標準庫 (更新版)
-# ==========================================================
 import uuid
 import json
 import torch
 import cv2
-import imageio  # 👈 補上這行，解決這次報錯的主角
+import numpy as np  # 2D 影像處理與 RemBG 仍需使用
 from PIL import Image, ImageEnhance
 from django.conf import settings
 from rembg import remove, new_session
@@ -104,12 +17,6 @@ from .interfaces import ImageProcessingInterface
 
 # 設定日誌記錄器
 logger = logging.getLogger(__name__)
-
-# 設定日誌記錄器
-logger = logging.getLogger(__name__)
-
-
-
 
 
 
@@ -141,7 +48,6 @@ class AIProcessor(ImageProcessingInterface):
         # 設定模型名稱 (預設使用 flash 進行諮詢，nano-banana 進行試穿)
         self.consultant_model = os.getenv("GEMINI_CONSULTANT_MODEL", "gemini-1.5-flash")
         self.model_name = os.getenv("GEMINI_MODEL_NAME", "nano-banana")
-        self.enable_densepose = os.getenv("ENABLE_DENSEPOSE", "false").lower() == "true"
 
         # 💡 進階初始化：嘗試加載針對人像分割優化的模型 (u2net_human_seg)
         try:
@@ -335,9 +241,7 @@ class AIProcessor(ImageProcessingInterface):
     def tool_garment_analysis(self, garment_files, user_data):
         """
         [Step 3] 幾何掃描：除了邊界，更要求 Gemini 分析材質垂墜度與透明度。
-        """
-        from google.genai import types  # 確保有匯入此類型
-        
+        """      
         items = []
         has_bottom = False
         info_list = user_data.get('garments', [])
@@ -538,209 +442,7 @@ class AIProcessor(ImageProcessingInterface):
     
     
     
-    
-    
-    
-    
-    
-    def generate_densepose(self, model_image_path):
-        """
-        [輔助工具] 姿態提取工具 - 專為 detectron2 v0.6 與 Gemini 視覺約束優化
-        包含動態解包防呆機制與純淨 IUV 渲染。
-        """
-        try:
-            # 1. 自動尋找 detectron2 套件位置推算路徑
-            import detectron2
-            d2_pkg_path = os.path.dirname(detectron2.__file__)
-            calculated_densepose_path = os.path.join(os.path.dirname(d2_pkg_path), 'projects', 'DensePose')
-            
-            if not os.path.exists(calculated_densepose_path):
-                calculated_densepose_path = "/app/detectron2/projects/DensePose"
-
-            _, pose_map_path = self.get_unique_filename(prefix="pose_map", ext="png")
-
-            # 2. 初始化 DensePose Predictor
-            if not hasattr(self, '_densepose_predictor'):
-                from detectron2.config import get_cfg
-                from detectron2.engine import DefaultPredictor
-                from densepose import add_densepose_config
-
-                cfg = get_cfg()
-                add_densepose_config(cfg)
-                
-                cfg_path = os.getenv("DENSEPOSE_CFG", "").strip()
-                if not cfg_path:
-                    cfg_path = os.path.join(calculated_densepose_path, "configs/densepose_rcnn_R_50_FPN_s1x.yaml")
-                
-                weights_path = os.getenv("DENSEPOSE_WEIGHTS", "").strip()
-                if weights_path and weights_path.startswith('http'):
-                    weights_local = "/tmp/densepose_weights.pkl"
-                    if not os.path.exists(weights_local):
-                        import urllib.request
-                        urllib.request.urlretrieve(weights_path, weights_local)
-                    weights_path = weights_local
-                
-                cfg.merge_from_file(cfg_path)
-                if weights_path:
-                    cfg.MODEL.WEIGHTS = weights_path
-                cfg.MODEL.DEVICE = os.getenv("DENSEPOSE_DEVICE", "cpu")
-                
-                # 💡 增加信心分數門檻，過濾雜訊，防止抓到錯誤的微小特徵
-                cfg.MODEL.ROI_HEADS.SCORE_THRESH_TEST = 0.5 
-                
-                self._densepose_predictor = DefaultPredictor(cfg)
-            
-
-            
-            img = cv2.imread(model_image_path)
-            if img is None:
-                return None, False, "無法讀取模特兒圖片"
-            
-            with torch.no_grad():
-                outputs = self._densepose_predictor(img)
-            
-            # 4. 檢查結果
-            if "instances" not in outputs:
-                return None, False, "DensePose 輸出格式異常"
-            instances = outputs["instances"].to("cpu")
-            if len(instances) == 0:
-                return None, False, "DensePose 未檢測到人體"
-            if not instances.has("pred_densepose"):
-                return None, False, "無法從影像中提取姿態特徵"
-
-            # ==========================================
-            # 5. 提取結果並繪圖 (終極解法：動態解包與純淨渲染)
-            # ==========================================
-            from densepose.vis.extractor import DensePoseResultExtractor
-            from densepose.vis.densepose_results import DensePoseResultsFineSegmentationVisualizer
-            
-            # A. 使用官方 Extractor 解析原始特徵 (將 GPU 裸訊號解碼)
-            extractor = DensePoseResultExtractor()
-            extracted_data = extractor(instances)
-            
-            # B. 動態解包 (Dynamic Unpacking) 🛡️ 防呆機制
-            # 解決 detectron2 不同版本 API 回傳變數數量不一致的致命痛點
-            if len(extracted_data) == 3:
-                boxes, scores, dp_results = extracted_data  # 某些版本回傳 3 個參數
-            elif len(extracted_data) == 2:
-                boxes, dp_results = extracted_data          # 某些版本回傳 2 個參數
-            else:
-                return None, False, f"未知的 DensePose 特徵格式: 預期 2 或 3 個變數，卻收到 {len(extracted_data)} 個"
-            
-            # C. 強制重新打包為嚴格的 2 元組格式 (Tuple)
-            formatted_data = (boxes, dp_results)
-            
-            # D. 啟動純淨渲染 (拔除 Bounding Box 外框，專供 Gemini 作為邊界約束圖)
-            visualizer = DensePoseResultsFineSegmentationVisualizer()
-            blank_bg = np.zeros(img.shape, dtype=np.uint8)
-            vis_img = visualizer.visualize(blank_bg, formatted_data)
-            # ==========================================
-
-            # 6. 儲存圖片
-            from PIL import Image
-            Image.fromarray(cv2.cvtColor(vis_img, cv2.COLOR_BGR2RGB)).save(pose_map_path, "PNG")
-            logger.info(f"✅ DensePose 成功產出純淨版 Pose Map: {pose_map_path}")
-            
-            return pose_map_path, True, None
-            
-        except Exception as e:
-            logger.error(f"❌ DensePose 報錯: {str(e)}")
-            import traceback
-            logger.error(traceback.format_exc())
-            return None, False, f"DensePose 執行失敗: {str(e)}"
-        
-
-
-
-
-    def reconstruct_3d(self, model_image_path, model_info):
-        """
-        [3D 重建核心] 
-        僅負責計算 SMPL 頂點與渲染影格，將影格列表回傳給 View。
-        """
-        import smplx
-        import torch
-        import trimesh
-        import pyrender
-        import numpy as np
-
-        try:
-            # 1. 解析參數
-            height_cm = float(model_info.get('user_height', 170.0))
-            weight_kg = float(model_info.get('user_weight', 70.0))
-            waist_cm = float(model_info.get('user_waistline', 80.0))
-
-            # 2. 建立 SMPL 模型與體型
-            print("開始建立SMPL....")
-            # Resolve SMPL model directory with local fallback.
-            primary_smpl_model_dir = os.getenv("SMPL_MODEL_DIR", "/app/smpl_assets")
-            fallback_smpl_model_dir = os.path.join(settings.BASE_DIR, "smpl_assets")
-            if os.path.exists(primary_smpl_model_dir):
-                smpl_model_dir = primary_smpl_model_dir
-                logger.info("Using SMPL model directory: %s", smpl_model_dir)
-            elif os.path.exists(fallback_smpl_model_dir):
-                smpl_model_dir = fallback_smpl_model_dir
-                logger.info(
-                    "Primary SMPL model directory not found (%s); using fallback: %s",
-                    primary_smpl_model_dir,
-                    smpl_model_dir,
-                )
-            else:
-                raise FileNotFoundError(
-                    "SMPL model directory not found. Checked primary path "
-                    f"'{primary_smpl_model_dir}' and fallback path "
-                    f"'{fallback_smpl_model_dir}'. "
-                    "Set SMPL_MODEL_DIR or place assets under BASE_DIR/smpl_assets/smpl."
-                )
-            # Build SMPL model
-            model = smplx.create(smpl_model_dir, model_type="smpl", gender="neutral")
-            betas = torch.zeros([1, 10])
-            betas[0, 0] = (weight_kg - 70.0) * 0.2
-            betas[0, 1] = (waist_cm - 80.0) * 0.15
-            print("開始建立SMPL  7")
-            # 3. 生成頂點與縮放
-            output = model(betas=betas, return_verts=True)
-            vertices = output.vertices[0].detach().cpu().numpy()
-            scale = height_cm / 170.0
-            vertices *= scale
-
-            # 4. 建立渲染場景
-            R_init = trimesh.transformations.rotation_matrix(np.radians(180), [0, 1, 0])
-            human_mesh = trimesh.Trimesh(vertices, model.faces)
-            human_mesh.apply_transform(R_init)
-
-            scene = pyrender.Scene(bg_color=[0.1, 0.1, 0.1])
-            material = pyrender.MetallicRoughnessMaterial(baseColorFactor=[0.8, 0.8, 0.8, 1.0], metallicFactor=0.3)
-            primitive = pyrender.Primitive(positions=human_mesh.vertices.astype(np.float32), 
-                                         indices=human_mesh.faces.astype(np.uint32), material=material)
-            mesh_node = scene.add(pyrender.Mesh(primitives=[primitive]))
-            
-            light = pyrender.DirectionalLight(color=[1.0, 1.0, 1.0], intensity=5.0)
-            scene.add(light, pose=trimesh.transformations.translation_matrix([0, 2, 2]))
-
-            # 5. 渲染影格 (不存檔，存進 list)
-            frames = []
-            r = pyrender.OffscreenRenderer(512, 512)
-            steps = 20 
-            radius = 3.2 * scale 
-            
-            for i in range(steps):
-                angle = (i / steps) * (2 * np.pi)
-                scene.set_pose(mesh_node, pose=trimesh.transformations.rotation_matrix(angle, [0, 1, 0]))
-                static_cam_pose = trimesh.transformations.translation_matrix([0, 0.2, radius])
-                cam_node = scene.add(pyrender.PerspectiveCamera(yfov=np.pi/3.0), pose=static_cam_pose)
-                
-                color, _ = r.render(scene)
-                frames.append(color)
-                scene.remove_node(cam_node)
-
-            r.delete()
-            # 🚀 回傳影格列表
-            return frames, True, "成功"
-            
-        except Exception as e:
-            return None, False, f"3D 重建計算失敗: {str(e)}"
-        
+       
 
     def remove_background_2d(self, pil_image):
         """
