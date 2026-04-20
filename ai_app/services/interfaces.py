@@ -22,11 +22,3 @@ class ImageProcessingInterface(ABC):
         """
         pass
 
-    @abstractmethod
-    def reconstruct_3d(self, model_image,model_info) -> str:
-        """
-        功能：3D 人體重建 (基於 SMPL 模型)
-        輸入：模特兒圖片 (model_image)
-        輸出：生成的 3D 模型檔案路徑 (例如 .obj, .glb 或 .ply)
-        """
-        pass    
