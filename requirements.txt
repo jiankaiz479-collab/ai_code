@@ -1,36 +1,22 @@
-# --- 核心 Web 框架 ---
-Django>=5.0,<7.0
-python-dotenv>=1.0
+# 固定在 5.0.x 系列，確保 Django 語法不會因為跳到 6.0 而改變
+Django==5.0.3
+# 環境變數管理
+python-dotenv==1.0.1
 
 # --- AI 與影像處理 ---
-google-genai>=1.0
-rembg[cpu]>=2.0
-pillow>=10.0
-opencv-python-headless>=4.8
-numpy>=1.23.5,<2.0
-scipy>=1.11
-
-# --- DensePose / Detectron2 核心依賴 (從 Dockerfile 移入) ---
-cython
-pycocotools>=2.0
-termcolor
-yacs
-tabulate
-cloudpickle
-matplotlib
-tqdm
-omegaconf
-fvcore
-iopath
-av>=12.0
+# Google Gemini API 最新穩定版
+google-genai==1.0.0
+# 去背核心 (固定使用 CPU 版)
+rembg[cpu]==2.0.53
+# 影像處理 (PIL) 確保與 rembg 相容
+pillow==10.2.0
+# OpenCV 無介面版 (固定 4.8 系列，非常穩定)
+opencv-python-headless==4.8.1.78
+# Numpy 嚴格鎖定在 1.26.4，避免 2.0 造成的相容性大災難
+numpy==1.26.4
+# 科學計算
+scipy==1.11.4
 
 # --- 網路工具 ---
-requests>=2.31
-
-pyrender
-trimesh
-smplx
-chumpy
-imageio
-PyOpenGL
-PyOpenGL-accelerate
+# 確保 API 請求穩定
+requests==2.31.0

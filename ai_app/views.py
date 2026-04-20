@@ -13,7 +13,6 @@ from django.views.decorators.csrf import csrf_exempt
 import uuid
 # 從自定義的服務層導入 AI 處理核心
 from .services.processing import AIProcessor
-import imageio
 # 初始化 Django 日誌記錄器
 logger = logging.getLogger(__name__)
 
