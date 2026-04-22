@@ -1,6 +1,21 @@
-venv/
-.git/
+# 1. 虛擬環境 (這是最佔空間、最需要排除的元兇！)
+**/venv*/
+**/.venv/
+env/
+
+# 2. 3D 模型權重檔 (我們是用掛載的，不需要 COPY 進去)
+ai_app/services/3d_engines/checkpoints/
+
+# 3. 版本控制資料夾 (幾萬個 Git 紀錄也會塞爆 Docker)
+.git
 .gitignore
+
+# 4. Python 編譯暫存檔
 __pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# 5. 所有的日誌與媒體暫存
+*.log
 media/
-db.sqlite3  
