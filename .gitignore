@@ -19,9 +19,12 @@ media/
 .idea/
 .DS_Store
 
-# 6. 忽略 AI 模型權重檔
-.u2net/
-densepose_assets/
-*.pkl
-*.onnx
-*.pth
+
+
+# 讓 Git 忽略虛擬環境
+ai_app/services/3d_engines/venv_pifuhd/
+venv/
+.venv/
+
+# 讓 Git 忽略大模型
+ai_app/services/3d_engines/checkpoints/
