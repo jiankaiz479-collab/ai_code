@@ -99,6 +99,47 @@ class AIProcessor(ImageProcessingInterface):
             logger.error(f"❌ [1500] Rembg 去背失敗: {str(e)}")
             return None, False, "1500", f"Rembg 運算核心異常: {str(e)}"
 
+    def compose_square_portrait(self, pil_img, top_bottom_ratio=0.05, output_size=None):
+        """
+        將去背後的人像放到固定尺寸的正方形透明畫布中，預留上下留白。
+        預設上下各保留 5% 空間，輸出尺寸固定，避免每次圖片大小不一致。
+        """
+        if pil_img is None:
+            return None
+
+        if output_size is None:
+            output_size = int(os.getenv("VTO_OUTPUT_SIZE", "1024"))
+
+        rgba = pil_img.convert("RGBA")
+        bbox = rgba.getbbox()
+        if not bbox:
+            return rgba
+
+        person_img = rgba.crop(bbox)
+        p_w, p_h = person_img.size
+
+        square_side = max(1, int(output_size))
+
+        margin_y = int(round(square_side * top_bottom_ratio))
+        margin_y = max(0, min(margin_y, square_side // 2 - 1))
+        target_inner_h = max(1, square_side - (2 * margin_y))
+        target_inner_w = target_inner_h
+
+        # 固定輸出尺寸下，將人物等比縮放到可容納的最大尺寸。
+        scale = min(target_inner_w / max(1, p_w), target_inner_h / max(1, p_h))
+        new_w = max(1, int(round(p_w * scale)))
+        new_h = max(1, int(round(p_h * scale)))
+        if new_w != p_w or new_h != p_h:
+            person_img = person_img.resize((new_w, new_h), Image.LANCZOS)
+            p_w, p_h = person_img.size
+
+        paste_x = (square_side - p_w) // 2
+        paste_y = margin_y + max(0, (target_inner_h - p_h) // 2)
+
+        canvas = Image.new("RGBA", (square_side, square_side), (0, 0, 0, 0))
+        canvas.paste(person_img, (paste_x, paste_y), person_img)
+        return canvas
+
     def check_image_blur(self, pil_img, threshold=50.0):
         """
         [工具] 清晰度檢測 (狀態碼: 1422)
@@ -318,27 +359,55 @@ class AIProcessor(ImageProcessingInterface):
 
             # --- [1. 構建 Final Prompt: 強調邊緣對比與單一背景，利於後續去背] ---
             final_prompt = (
+                # 规则 1：保持不变，人本偵測
                 f"### CRITICAL RULE 1: HUMAN PRESENCE CHECK. "
-                f"BEFORE ANY SYNTHESIS, verify that the model_image contains a legible HUMAN BODY. "
-                f"IF the model_image contains ONLY a flat garment, an empty hanger, or no visible person, "
-                f"STOP immediately and output the exact text: 'ERROR: NO_HUMAN_DETECTED'. DO NOT PROCESS. "
+                f"IF no legible HUMAN BODY is detected, output: 'ERROR: NO_HUMAN_DETECTED' and STOP. "
 
-                f"### ROLE: Senior Virtual Fashion VFX Engineer. Specializing in Garment Physics and Edge Precision. "
+                # 修改 ROLE：升級為资深 VFX 工程师與幾何專家，強調「挂载」與「物理幾何」
+                f"### ROLE: Senior Virtual Fashion VFX Engineer & Geometric Realism Specialist. "
 
-                f"### GEOMETRIC SCAN PROTOCOL: Spatial analysis of garments. Identify: Neckline, Sleeves, Hemline. "
-                f"Analyze Anatomical Displacement and Material Properties (Stiffness/Drape/Grain). "
+                # 保持不变，標準化輸入目標
+                f"### TARGET: Generate a standardized input image for high-resolution 3D Human Reconstruction (PIFuHD). "
 
-                f"### MODEL DATA: Height {u_h}cm, Waistline Level {u_w}cm. "
+                # 保持不变，硬性圖像規格
+                f"### IMAGE SPECIFICATIONS: "
+                f"1. CANVAS: 1024x1024 pixels, 1:1 square ratio. "
+                f"2. SUBJECT SCALE: Human figure must occupy 90% of vertical height. "
+                f"3. PADDING: 5% clear buffer at top (above head) and 5% at bottom (below feet). "
+                f"4. ALIGNMENT: Perfectly centered horizontally. "
 
                 f"### EXECUTION RULES: "
-                f"1. CHROMA-KEY ENVIRONMENT: Synthesize the model against a UNIFORM, SOLID WHITE background. Ensure maximum contrast between the garment edges and the background. NO complex shadows, NO props, and NO background textures. "
-                f"2. FULL-BODY VISIBILITY: Ensure the entire person (head to toe) is rendered within the frame. Even if the original photo is cropped, attempt to complete the silhouette for a full-body look. "
-                f"3. ANATOMICAL FIDELITY: Keep the model's face, skin texture, and body proportions 100% UNCHANGED. Only apply garments over the body. "
-                f"4. BOUNDARY LOCK: For tops/outerwear, the hemline MUST end precisely at the {u_w}cm waistline. DO NOT extend fabric; IT IS NOT A DRESS. "
-                f"5. AUTO-COMPLETION: {'NONE.' if garments_ctx['has_bottom'] else 'CRITICAL: No lower-body garment detected; paint plain MATTE BLACK trousers to complete the look.'} "
-                f"6. TEXTURE FIDELITY: Maintain 100% color accuracy, fabric grain, and logos from the source images. "
+                # 修改 1：強調照片真實，但要是「幾何感知」的照片
+                f"1. VISUAL STYLE: A photorealistic, high-resolution full-body PHOTOGRAPH. Ensure the composite garments look naturally and seamlessly integrated with the human subject. "
+                # 保持不变，純白底
+                f"2. BACKGROUND: SOLID PURE WHITE (#FFFFFF). No shadows on the floor, no gradient, no textures. "
+                
+                # ⚠️ 修改 3：針對 3D 生成最重要的修改！ ⚠️
+                # PIFuHD 是靠皺褶陰影來判斷深度。原本的 'Flat lighting' 會消滅皺褶，導致 3D 變扁。
+                # 修改為「幾何陰影燈光」，利用微妙的定向光製造皱褶，提供深度資訊。
+                f"3. GEOMETRIC-AWARE LIGHTING: Use bright studio lighting that mimics a soft yet distinct directional key light (e.g., from top-left) to reveal all garment textures and, Crucially, cast subtle, localized micro-shadows within garment folds and wrinkles. This is ESSENTIAL for providing 3D depth and geometry information for the reconstruction algorithm. NO DARK OR HARSH SHADOWS, ONLY MICRO-SHADOWS WITHIN FOLDS. "
+                
+                # 修改 4：人機對齊指令
+                f"4. ANATOMICAL & GARMENT FIDELITY: Maintain original user's face and body proportions Perfectly UNCHANGED. The garments must wrap around the body naturally, adhering to the body geometry. There must be ZERO GAP between the garment and the skin or body outline. The synthesis must be pixel-aligned to the subject's anatomy. "
+                
+                # 保持不变，不產生 Artifacts
+                f"5. NO ARTIFACTS: Do not generate normal maps, depth maps, or wireframes. Output ONLY the RGB colored photo. "
+                
+                # 修改 6：自動補全 (修正原本的邏輯，確保生成腳部)
+                f"6. AUTO-COMPLETION: Paint plain MATTE BLACK shoes to complete the full-body look. "
 
-                f"### OUTPUT: A high-resolution, photorealistic composite image with sharp, clean edges against a solid white studio background."
+                # --- 以下為新增的「對後續 3D 製作有幫助」強化區塊 ---
+                f"### OPTIMIZATION FOR 3D MESH GENERATION (PIFuHD): "
+                # 強調「邊緣銳利」，方便演算法偵測人體邊界
+                f"7. BOUNDARY PRECISION: Ensure absolute razor-sharp edges and clear separation between the garment outlines, body silhouette, and the solid white background. No anti-aliasing or motion blur. "
+                # 修改原本的「紋理渲染」，更強調幾何細節（釦子、縫線、釦眼）
+                f"8. GEOMETRIC DETAIL ENHANCEMENT: Intensify visible geometric details of the garment: buttons, distinct seam lines, lapel edges, and zipper tracks must be sharply discernible and three-dimensional, not flattened texture. "
+                # 拉高「皺褶對比」，提供明確的深度梯度
+                f"9. WRINKLE DEPTH OPTIMIZATION: Slightly increase the contrast within garment folds (wrinkles) to make clothing depth more decipherable for the 3D depth extraction algorithm. "
+                # ---------------------------------------------------
+
+                # 修改 Output 描述，強調「一模一樣」和「3D 幾何」
+                f"### OUTPUT: One high-resolution RGB photo, 1024x1024, centered, full-body (including shoes), perfectly composite and hanging naturally on the anatomy, with ultra-sharp edges, perfectly optimized for Normal Map derivation and 3D mesh reconstruction."
             )
 
             source_images = [item['img'] for item in garments_ctx['items']]
@@ -383,47 +452,9 @@ class AIProcessor(ImageProcessingInterface):
                     # 如果失敗，強制轉為 RGBA 模式
                     processed_png = result_pil.convert("RGBA")
 
-                # ==========================================
-                # 【改動重點】創建純透明滿版畫布 (保留 canvas 變數名)
-                # ==========================================
-                # 取得原始圖片尺寸
-                orig_w, orig_h = result_pil.size
-
-                # 【關鍵修改】：
-                # 原本是：Image.new("RGB", (orig_w, orig_h), (255, 255, 255)) -> 純白 RGB
-                # 現在改為：模式 "RGBA"，底色 (0, 0, 0, 0) -> 純透明 RGBA
-                canvas = Image.new("RGBA", (orig_w, orig_h), (0, 0, 0, 0))
-
-                # ==========================================
-                # (原本代碼) 計算置中與底部預留白邊 ( Padding參數均未更動)
-                # ==========================================
-                # 取得去背圖的邊框信息 (PIL能自動判別 alpha 通道)
-                bbox = processed_png.getbbox()
-
-                if bbox:
-                    # 裁切出乾淨的人像部分
-                    person_img = processed_png.crop(bbox)
-                    p_w, p_h = person_img.size
-                    
-                    # 水平置中 (計算 paste_x)
-                    paste_x = (orig_w - p_w) // 2
-                    
-                    # 底部預留 10% 的畫布高度作為白邊 (計算 bottom_padding)
-                    bottom_padding = int(orig_h * 0.1)
-                    
-                    # 計算貼上的 Y 座標 (paste_y)
-                    paste_y = orig_h - p_h - bottom_padding
-                    
-                    # 頂部安全檢查
-                    if paste_y < 0: paste_y = 10
-                    
-                    # 【執行貼上】：
-                    # 貼上透明畫布。第三個參數 person_img 是遮罩，確保透明區塊正確融合。
-                    canvas.paste(person_img, (paste_x, paste_y), person_img)
-                    
-                    # final_output 現在是一個具備正確人體置中比例，且背景純透明的 RGBA 圖片。
-                    final_output = canvas
-                else:
+                # 轉為正方形構圖，頭頂與腳底各保留 5% 空間。
+                final_output = self.compose_square_portrait(processed_png, top_bottom_ratio=0.05, output_size=1024)
+                if final_output is None:
                     final_output = result_pil
 
             except Exception as e:
