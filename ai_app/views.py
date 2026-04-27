@@ -4,6 +4,7 @@ import json
 import tempfile
 import numpy as np  # 如果你有用到 np.array 也要補這行
 import logging
+import requests  # 加上這一行
 from PIL import Image, ImageEnhance
 from django.conf import settings
 from django.http import JsonResponse, HttpResponse
