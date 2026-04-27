@@ -296,6 +296,7 @@ class TryCombineView(View):
             }, status=500)
         
 
+
 @method_decorator(csrf_exempt, name='dispatch')
 class ReconstructView(View):
     def post(self, request, *args, **kwargs):
@@ -312,26 +313,34 @@ class ReconstructView(View):
         try:
             processor = AIProcessor()
             model_image.seek(0)
-            pil_img = Image.open(model_image).convert("RGB")
+            # 讀取圖片並確保是 RGBA
+            pil_img = Image.open(model_image).convert("RGBA")
 
-            # ========== 步驟 2: 執行 2D 去背 ==========
-            # result 字典應包含 'processed_image' (去背後的 PIL Image)
-            # status 用於判斷人物是否完整
-            result, status = processor.remove_background_2d(pil_img)
+            # ========== 步驟 2: 執行 2D 去背與標準化 (修正邏輯) ==========
+            # 1. 執行去背
+            result, status, code, err_msg = processor.remove_background(pil_img)
+            
+            # 2. 獲取去背後的 Image 對象 (假設 result 裡面存的是 PIL Image)
+            # 這裡要確保傳給下一個函數的是去背後的圖片
+            no_bg_img = result.get('processed_image') if isinstance(result, dict) else result
 
-            # ========== 步驟 3: 肢體不全錯誤處理 (對應 3422) ==========
-            if status == "incomplete_body":
+            # 3. 執行正方形標準化 (5% 留白, 1024x1024)
+            # 注意：這裡我們把產出的結果接給 final_image
+            final_image = processor.compose_square_portrait(no_bg_img, top_bottom_ratio=0.05, output_size=1024)
+
+            # ========== 步驟 3: 錯誤處理 (對應 3422) ==========
+            # 檢查 final_image 是否生成成功，以及 status 是否為完整人體
+            if final_image is None or status == "incomplete_body":
                 return JsonResponse({
                     "code": 422,
                     "message": "3422",
                     "debug_info": {
-                        "error_detail": "Please ensure your full body and all limbs are visible in the photo."
+                        "error_detail": err_msg or "Please ensure your full body and all limbs are visible in the photo."
                     }
                 }, status=422)
 
-            # ========== 步驟 4: 存檔與回傳 (對應 3200) ==========
-            final_image = result.get('processed_image')
-            # 檔名改為 modules 前綴
+            # ========== 步驟 4: 存檔與構建 Multipart 回傳 (對應 3200) ==========
+            # 這裡使用的是經過 compose_square_portrait 處理後的 final_image
             file_name, file_path = processor.get_unique_filename(prefix="modules", ext="png")
             final_image.save(file_path, "PNG")
 
@@ -344,12 +353,14 @@ class ReconstructView(View):
                 }
             }
 
-            # 構建 Multipart/mixed 響應
+            # 構建 Multipart/mixed 響應 (維持原有的高品質回傳格式)
             boundary = 'frame_boundary'
             response_body = []
+            
             response_body.append(f'--{boundary}\r\nContent-Type: application/json\r\n\r\n'.encode('utf-8'))
             response_body.append(json.dumps(analysis_data, indent=2).encode('utf-8'))
             response_body.append(b'\r\n')
+            
             response_body.append(f'--{boundary}\r\nContent-Type: image/png\r\n'.encode('utf-8'))
             response_body.append(f'Content-Disposition: attachment; filename="{file_name}"\r\n\r\n'.encode('utf-8'))
             
@@ -362,9 +373,8 @@ class ReconstructView(View):
             return HttpResponse(b''.join(response_body), content_type=f'multipart/mixed; boundary={boundary}')
 
         except Exception as e:
-            # 系統崩潰處理 (對應 3500)
             return JsonResponse({
                 "code": 500,
                 "message": "3500",
                 "debug_info": {"error_detail": f"Server crash or heavy load: {str(e)}"}
-            }, status=500)   
+            }, status=500)
