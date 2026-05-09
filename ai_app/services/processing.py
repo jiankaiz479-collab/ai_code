@@ -4,6 +4,8 @@ import sys
 import logging
 import uuid
 import json
+import time
+from concurrent.futures import ThreadPoolExecutor
 import torch
 import cv2
 import numpy as np  # 2D 影像處理與 RemBG 仍需使用
@@ -31,13 +33,6 @@ class AIProcessor(ImageProcessingInterface):
         # 從環境變數獲取 Google API Key
         self.api_key = os.getenv("GOOGLE_API_KEY")
         
-        # 第一次嘗試初始化預設的 rembg session
-        try:
-            self.rembg_session = new_session()
-        except Exception as e:
-            logger.warning(f"rembg session 初始化失敗: {e}")
-            self.rembg_session = None
-
         # 初始化 Google GenAI Client
         try:
             self.client = genai.Client(api_key=self.api_key) if self.api_key else None
@@ -193,44 +188,56 @@ class AIProcessor(ImageProcessingInterface):
 
             # 使用 if/else 根據模式切換 Prompt
             if mode == "outfit":
-              prompt = """
+                prompt = """
                 Analyze the OVERALL COORDINATION in this image. 
                 Identify the fashion aesthetic/genre. 
                 Return ONLY a JSON object.
 
-                【TARGET AESTHETICS】:
-                Focus on categories such as: 
-                - Streetwear (街頭), Minimalist (極簡), Vintage (復古), Korean Style (韓系), 
-                - Japanese Style (日系), Preppy (學院風), Casual (休閒), Formal (正式), 
-                - Sporty (運動), Techwear (機能風).
-
+                【AESTHETIC GUIDELINES】:
+                    -  "style_name": Identify the fashion aesthetic or genre. 
+                    * Output MUST be in Traditional Chinese (繁體中文).
+                    * Provide 0-3 tags. DO NOT include physical descriptions.
+                    * Do not limit to a fixed list; use any modern fashion subcultures that best fit.
                 【STRICT RULES】:
                 1. DO NOT use gendered words (e.g., Feminine, Masculine, Girly).
                 2. DO NOT use physical descriptions (e.g., Long-sleeve, Cotton, Slim).
-                3. Return 3-5 tags that best describe the vibe.
+                3. Return UP TO 3 tags (最多3種) in Traditional Chinese (繁體中文) that best describe the vibe. 
+                   Only provide relevant tags; do not force three if fewer are appropriate.
 
                 JSON Structure:
                 {
-                "style_name": ["Style1", "Style2", ...]
+                "style_name": ["風格標籤1", "風格標籤2"]
                 }
             """
             else:
                 prompt = """
-                    Analyze the clothing item in this image. Provide the analysis in English and return ONLY a JSON object.
+                    Analyze the clothing item in this image. Provide the analysis in English (except for style_name) and return ONLY a JSON object.
+
                     【STRICT CATEGORY RULE】:
-                    You MUST choose EXACTLY one category from this list:
+                    You MUST choose EXACTLY one category from this list in English:
                     - "clothing", "pants", "outerwear", "intimates", "skirt", "others".
+
                     【PURE AESTHETIC STYLE RULE】:
-                    - "style_name": Identify the fashion aesthetic or genre.
-                    - Min 3 tags. DO NOT include physical descriptions.
+                    - "style_name": Identify the fashion aesthetic or genre. 
+                    * Output MUST be in Traditional Chinese (繁體中文).
+                    * Provide 0-3 tags. DO NOT include physical descriptions.
+                    * Do not limit to a fixed list; use any modern fashion subcultures that best fit.
+
+                    【STYLING ANALYSIS RULE】:
+                    - "style_analysis": Provide a brief description (2-3 sentences) in English covering:
+                    * Typical occasions or scenarios where this outfit would be appropriate.
+                    * A general description of the outfit's visual vibe and coordination style.
+
                     【COLOR RULE】:
                     - "color_name": List up to 3 dominant color names in English.
+                    * Use basic color names only. DO NOT distinguish between brightness or shades (e.g., use "Pink" instead of "Light Pink" or "Dark Pink"). 
 
                     JSON Structure:
                     {
                     "clothes_category": "Selected Category",
-                    "style_name": ["Style1", "Style2", ...],
-                    "color_name": ["Color1", "Color2", ...]
+                    "style_name": ["風格1", "風格2", "風格3"],
+                    "style_analysis": "Occasions and visual vibe description in English...",
+                    "color_name": ["Color1", "Color2", "Color3"]
                     }
                 """
             
@@ -257,13 +264,14 @@ class AIProcessor(ImageProcessingInterface):
                 style_analysis = {
                     "clothes_category": result.get("clothes_category"),
                     "style_name": result.get("style_name"),
+                    "style_analysis": result.get("style_analysis"),
                     "color_name": result.get("color_name")
                 }
                 
-            logger.info(f"✅ Gemini 風格分析成功 ({mode}): {style_analysis}")
+            logger.info(f"✅ Gemini 風格分析成功 ({mode})")
             return style_analysis, True, "1200", None
                 
-            logger.info(f"✅ Gemini 風格分析成功 ({mode}): {style_analysis}")
+            logger.info(f"✅ Gemini 風格分析成功 ({mode})")
             # 成功狀態碼統一使用 1200
             return style_analysis, True, "1200", None
             
@@ -282,8 +290,7 @@ class AIProcessor(ImageProcessingInterface):
     def tool_garment_analysis(self, garment_files, user_data):
         """
         [Step 3] 幾何掃描：除了邊界，更要求 Gemini 分析材質垂墜度與透明度。
-        """      
-        items = []
+        """
         has_bottom = False
         info_list = user_data.get('garments', [])
 
@@ -309,11 +316,13 @@ class AIProcessor(ImageProcessingInterface):
         """
 
 
-        for i, f in enumerate(garment_files):
+        def _scan_one(idx_file):
+            idx, f = idx_file
+            t_start = time.time()
+            logger.info(f"  [Step3] item#{idx} start @ {t_start:.3f}")
             try:
                 pil_img = Image.open(f).convert("RGB")
-                category = info_list[i].get('clothes_category', 'others')
-                # --- [AI 掃描點] ---
+                category = info_list[idx].get('clothes_category', 'others')
                 response = self.client.models.generate_content(
                     model=self.consultant_model,
                     contents=[pil_img, analysis_prompt],
@@ -322,27 +331,36 @@ class AIProcessor(ImageProcessingInterface):
                         temperature=0.1
                     )
                 )
-                scan_result = response.text 
-
+                logger.info(f"  [Step3] item#{idx} done in {time.time()-t_start:.2f}s")
+                return idx, {
+                    "img": pil_img,
+                    "cat": category,
+                    "rule": info_list[idx].get('garment_info', {}),
+                    "scan_report": response.text,
+                }, None
             except Exception as e:
-                # ❌ 這裡對齊狀態碼 2500
-                logger.error(f"❌ Step 3 分析失敗: {e}")
-                return {
-                    "error_code": 2500,
-                    "suggest": "AI Model (Analysis) service is currently unavailable. Please try again later."
-                }, "fail"
+                logger.info(f"  [Step3] item#{idx} FAIL in {time.time()-t_start:.2f}s")
+                return idx, None, e
 
-            if category in ['pants', 'skirt']:
-                has_bottom = True
-            
-            items.append({
-                "img": pil_img,
-                "cat": category,
-                "rule": info_list[i].get('garment_info', {}),
-                "scan_report": scan_result
-            })
-            
-        return {"items": items, "has_bottom": has_bottom}, "success"
+        n = len(garment_files)
+        items_by_idx = [None] * n
+        max_workers = max(1, min(n, 4))
+        t0 = time.time()
+
+        with ThreadPoolExecutor(max_workers=max_workers) as ex:
+            for idx, item, err in ex.map(_scan_one, enumerate(garment_files)):
+                if err is not None:
+                    logger.error(f"❌ Step 3 分析失敗 (item {idx}): {err}")
+                    return {
+                        "error_code": 2500,
+                        "suggest": "AI Model (Analysis) service is currently unavailable. Please try again later."
+                    }, "fail"
+                items_by_idx[idx] = item
+                if item["cat"] in ('pants', 'skirt'):
+                    has_bottom = True
+
+        logger.info(f"✅ Step 3 完成: {n} 件衣物分析 (耗時 {time.time() - t0:.2f}s)")
+        return {"items": items_by_idx, "has_bottom": has_bottom}, "success"
 
 
     # ==========================================

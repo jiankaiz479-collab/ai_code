@@ -7,6 +7,7 @@ import logging
 import requests  # 加上這一行
 from PIL import Image, ImageEnhance
 from django.conf import settings
+from concurrent.futures import ThreadPoolExecutor
 from django.http import JsonResponse, HttpResponse
 from django.views import View
 from django.utils.decorators import method_decorator
@@ -24,61 +25,62 @@ import time  # 👈 就是漏掉這一行！
 # 取得日誌記錄器
 logger = logging.getLogger(__name__)
 
+
+def _timed(fn, *args, **kwargs):
+    t = time.time()
+    return fn(*args, **kwargs), time.time() - t
 @method_decorator(csrf_exempt, name='dispatch')
 class RemoveBgView(View):
+    """
+    1. 去背功能 (Remove Background)
+    加速邏輯：採用 ThreadPoolExecutor 讓去背與 Gemini 分析並行執行。
+    """
+    def _run_parallel(self, processor, input_pil):
+        """並行執行核心：去背與分析同時啟動"""
+        t_total = time.time()
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            # 同時發送去背與分析請求
+            fut_bg = executor.submit(_timed, processor.remove_background, input_pil)
+            fut_style = executor.submit(_timed, processor.analyze_clothing_style, input_pil)
+            
+            # 獲取結果
+            (output_img, ok_bg, code_bg, err_bg), bg_dt = fut_bg.result()
+            (style, ok_style, code_style, err_style), style_dt = fut_style.result()
+            
+        total_dt = time.time() - t_total
+        
+        if not ok_bg:
+            raise RuntimeError(f"1500|{code_bg}|{err_bg}")
+        if not ok_style:
+            raise RuntimeError(f"1501|1501|{err_style}")
+
+        # 處理完成後才進行 IO 存檔
+        file_name, file_path = processor.get_unique_filename(prefix="processed", ext="png")
+        output_img.save(file_path, "PNG")
+
+        return output_img, style, file_name, file_path, {
+            "bg": bg_dt, "style": style_dt, "total": total_dt
+        }
+
     def post(self, request, *args, **kwargs):
-        # 紀錄請求開始時間
         start_time = time.time()
-        logger.info("--- [G2] 接收到去背請求 (RemoveBgView POST) ---")
-        
+        logger.info("--- [G2] 接收到去背請求 (並行加速模式) ---")
+
         clothes_image = request.FILES.get('clothes_image')
-        
-        # --- 基礎檢查 1400 / 1415 ---
         if not clothes_image:
-            logger.warning("❌ [G2] 請求失敗: 未偵測到上傳圖片 (1400)")
             return JsonResponse({"code": 400, "message": "1400"}, status=400)
         
         if not clothes_image.content_type.startswith('image/'):
-            logger.warning(f"❌ [G2] 請求失敗: 不支援的檔案格式 {clothes_image.content_type} (1415)")
             return JsonResponse({"code": 415, "message": "1415"}, status=415)
 
         try:
-            # 初始化處理器
-            logger.info("⏳ [G2] 正在初始化 AIProcessor...")
             processor = AIProcessor()
-            
-            if hasattr(clothes_image, 'seek'): 
-                clothes_image.seek(0)
             input_pil = Image.open(clothes_image).convert("RGBA")
-            logger.info(f"✅ [G2] 圖片讀取成功 (大小: {input_pil.size})")
 
-            # --- 第一關：去背處理 [1500] ---
-            logger.info("⏳ [G2] 開始執行去背處理 (RemBG)...")
-            output_img, success, code, err = processor.remove_background(input_pil)
-            
-            if not success: 
-                logger.error(f"❌ [G2] 去背失敗: 代碼 {code}, 錯誤: {err}")
-                return JsonResponse({"code": 500, "message": code, "err": err}, status=500)
-            
-            logger.info("✅ [G2] 去背完成，成功移除背景")
+            # 執行並行加速處理
+            output_img, style_analysis, file_name, file_path, timings = self._run_parallel(processor, input_pil)
 
-            # 暫存去背後的圖供後續分析
-            file_name, file_path = processor.get_unique_filename(prefix="processed", ext="png")
-            output_img.save(file_path, "PNG")
-            logger.info(f"💾 [G2] 處理後的圖片已存至: {file_path}")
-
-            # --- 第三關：時尚風格分析 [1501] ---
-            logger.info("⏳ [G2] 開始執行 Gemini 時尚風格分析 (1501)...")
-            style_analysis, success, code, err = processor.analyze_clothing_style(file_path)
-            
-            if not success: 
-                logger.error(f"❌ [G2] 風格分析失敗: 1501, 錯誤細節: {err}")
-                return JsonResponse({"code": 500, "message": "1501", "err": err}, status=500)
-            
-            logger.info(f"✅ [G2] 分析結果取得成功: {style_analysis.get('clothes_category')}")
-
-            # ========== [成功回覆: 1200 OK] ==========
-            # 保持原本的結構：data 內包含 style_analysis
+            # 封裝 JSON
             analysis_data = {
                 "code": 200,
                 "message": "1200",
@@ -88,30 +90,22 @@ class RemoveBgView(View):
                 }
             }
             json_pretty = json.dumps(analysis_data, indent=4, ensure_ascii=False)
-            logger.debug(f"📊 [G2] 準備回傳 JSON 資料內容:\n{json_pretty}")
 
-            # --- 封裝 Multipart 回傳格式 ---
+            # 封裝 Multipart 響應
             boundary = 'bg_removal_boundary'
-            logger.info("⏳ [G2] 正在封裝 Multipart/mixed 響應...")
-            
             response_body = [
                 f'--{boundary}\r\nContent-Disposition: form-data; name="analysis"\r\nContent-Type: application/json\r\n\r\n{json_pretty}\r\n'.encode('utf-8'),
                 f'--{boundary}\r\nContent-Disposition: form-data; name="processed_image"; filename="{file_name}"\r\nContent-Type: image/png\r\n\r\n'.encode('utf-8')
             ]
-            
             with open(file_path, 'rb') as f:
                 response_body.append(f.read())
             response_body.append(f'\r\n--{boundary}--\r\n'.encode('utf-8'))
-            
-            # 計算總耗時
-            duration = round(time.time() - start_time, 2)
-            logger.info(f"🎉 [G2] 流程全部順利完成！總耗時: {duration} 秒")
-            
+
+            logger.info(f"🎉 去背完成！總耗時: {time.time()-start_time:.2f}s (並行節省了約 {min(timings['bg'], timings['style']):.2f}s)")
             return HttpResponse(b''.join(response_body), content_type=f'multipart/form-data; boundary={boundary}')
 
         except Exception as e:
-            # 攔截所有未預期的崩潰
-            logger.exception(f"💥 [G2] 伺服器內部系統崩潰: {str(e)}")
+            logger.exception(f"💥 處理崩潰: {str(e)}")
             return JsonResponse({"code": 500, "message": "1500", "debug": str(e)}, status=500)
 # ==========================================
 # 2. 虛擬試穿 (Virtual Try-On)
@@ -122,9 +116,11 @@ class TryCombineView(View):
     def post(self, request, *args, **kwargs):
         # 紀錄整體流程開始時間
         start_time = time.time()
+        timings = {}
         logger.info("--- [G3] 開始執行虛擬試穿合成流程 (TryCombineView POST) ---")
 
         # ========== 步驟 1: 數據與多檔案接收 ==========
+        step1_start = time.time()
         model_image = request.FILES.get('model_image')
         garment_images = request.FILES.getlist('garment_images') 
 
@@ -132,7 +128,8 @@ class TryCombineView(View):
             data_str = request.POST.get('data', '{}')
             data = json.loads(data_str)
             garments_info = data.get('garments', [])
-            logger.info(f"✅ [G3] JSON 解析成功: 收到 {len(garments_info)} 件衣物資訊")
+            timings['json_parse'] = time.time() - step1_start
+            logger.info(f"✅ [G3] JSON 解析成功: 收到 {len(garments_info)} 件衣物資訊 (耗時: {timings['json_parse']:.2f}s)")
         except Exception as e:
             # 2400: 缺少輸入參數或格式錯誤
             logger.error(f"❌ [G3] JSON 解析失敗: {str(e)}")
@@ -161,20 +158,42 @@ class TryCombineView(View):
 
         try:
             logger.info("⏳ [G3] 初始化 AIProcessor 並進行圖片指標重置...")
+            step2_start = time.time()
             processor = AIProcessor()
             model_image.seek(0)
             for g in garment_images: 
                 g.seek(0)
-            logger.info(f"✅ [G3] 指標重置完成，Model 圖片名稱: {model_image.name}")
+            timings['init'] = time.time() - step2_start
+            logger.info(f"✅ [G3] 指標重置完成，Model 圖片名稱: {model_image.name} (耗時: {timings['init']:.2f}s)")
 
-            # ========== 步驟 3: 款式分析 ==========
-            # 這是第一階段 AI 分析
-            logger.info("⏳ [G3] 啟動 tool_garment_analysis (衣物風格分析)...")
-            analysis_start = time.time()
+            # ========== 步驟 3 & 4: 並行處理 (衣物分析 + 圖片轉換) ==========
+            step3_start = time.time()
+            logger.info("⏳ [G3] 啟動並行處理：衣物風格分析 + 模型圖片預處理...")
+            
+            def _analyze_garments():
+                try:
+                    return processor.tool_garment_analysis(garment_images, data)
+                except Exception as e:
+                    logger.exception(f"❌ 衣物分析異常: {str(e)}")
+                    raise
+
+            def _prepare_model_image():
+                try:
+                    return Image.open(model_image).convert("RGB")
+                except Exception as e:
+                    logger.exception(f"❌ 圖片轉換異常: {str(e)}")
+                    raise
+
             try:
-                garments_ctx, consult_status = processor.tool_garment_analysis(garment_images, data)
+                with ThreadPoolExecutor(max_workers=2) as executor:
+                    fut_garment = executor.submit(_analyze_garments)
+                    fut_image = executor.submit(_prepare_model_image)
+                    
+                    # 等待兩個結果
+                    garments_ctx, consult_status = fut_garment.result()
+                    pil_raw = fut_image.result()
                 
-                # 關鍵修正：檢查 tool_garment_analysis 是否回傳失敗狀態
+                # 檢查衣物分析結果
                 if consult_status == "fail":
                     logger.error("❌ [G3] tool_garment_analysis 回傳失敗狀態")
                     return JsonResponse({
@@ -183,22 +202,20 @@ class TryCombineView(View):
                         "debug_info": {"suggest": garments_ctx.get('suggest', "AI 分析服務異常")}
                     }, status=500)
                 
-                logger.info(f"✅ [G3] Style 分析完成，耗時: {round(time.time() - analysis_start, 2)}s")
+                timings['parallel_step'] = time.time() - step3_start
+                logger.info(f"✅ [G3] 並行處理完成 (衣物分析 + 圖片轉換)，耗時: {timings['parallel_step']:.2f}s")
+                
             except Exception as e:
-                logger.exception(f"💥 [G3] Style 分析階段發生未預期錯誤: {str(e)}")
+                logger.exception(f"💥 [G3] 並行處理階段發生未預期錯誤: {str(e)}")
                 return JsonResponse({
                     "code": 500,
                     "message": "2500",
                     "debug_info": {"suggest": f"AI 分析服務異常: {str(e)}"}
                 }, status=500)
 
-            # ========== 步驟 4: 影像優化 ==========
-            logger.info("⏳ [G3] 正在轉換 Model 圖片為 RGB 格式...")
-            pil_raw = Image.open(model_image).convert("RGB")
-
             # ========== 步驟 5: 核心合成 ==========
+            step5_start = time.time()
             logger.info("🚀 [G3] 開始核心合成流程 (virtual_try_on)...")
-            vto_start = time.time()
             
             # 正確拆解 Tuple: (result 字典, status 字串)
             result, status = processor.virtual_try_on(
@@ -206,6 +223,9 @@ class TryCombineView(View):
                 garments_ctx=garments_ctx,
                 user_data=data
             )
+            
+            timings['vto_core'] = time.time() - step5_start
+            logger.info(f"⏳ [G3] 核心合成耗時: {timings['vto_core']:.2f}s")
             
             # 處理未偵測到人體 (2422) 或其他合成錯誤 (2501)
             if status == "fail":
@@ -229,8 +249,12 @@ class TryCombineView(View):
 
             # ========== 步驟 7: 合成後的風格分析 ==========
             # 呼叫分析函式，若失敗 code 為 "2504"
+            step7_start = time.time()
             logger.info("⏳ [G3] 啟動合成後穿搭風格分析 (mode=outfit)...")
             style_result, outfit_success, outfit_code, outfit_err = processor.analyze_clothing_style(final_image, mode="outfit")
+
+            timings['outfit_analysis'] = time.time() - step7_start
+            logger.info(f"⏳ [G3] 風格分析耗時: {timings['outfit_analysis']:.2f}s")
 
             # 2. 處理 style_name (確保拿到的是整個列表)
             if outfit_success:
@@ -282,7 +306,13 @@ class TryCombineView(View):
             
             # 計算整體流程時間
             duration = round(time.time() - start_time, 2)
-            logger.info(f"🎉 [G3] 虛擬試穿流程圓滿結束！總耗時: {duration}s")
+            timings['total'] = duration
+            
+            # 詳細時間分解日誌
+            timing_details = " | ".join([f"{k}: {v:.2f}s" for k, v in timings.items()])
+            logger.info(f"🎉 [G3] 虛擬試穿流程圓滿結束！")
+            logger.info(f"   ⏱️ 時間分解: {timing_details}")
+            logger.info(f"   📊 總耗時: {duration}s")
             
             return HttpResponse(b''.join(response_body), content_type=f'multipart/mixed; boundary={boundary}')
 
