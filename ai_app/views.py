@@ -116,9 +116,11 @@ class TryCombineView(View):
     def post(self, request, *args, **kwargs):
         # 紀錄整體流程開始時間
         start_time = time.time()
+        timings = {}
         logger.info("--- [G3] 開始執行虛擬試穿合成流程 (TryCombineView POST) ---")
 
         # ========== 步驟 1: 數據與多檔案接收 ==========
+        step1_start = time.time()
         model_image = request.FILES.get('model_image')
         garment_images = request.FILES.getlist('garment_images') 
 
@@ -126,7 +128,8 @@ class TryCombineView(View):
             data_str = request.POST.get('data', '{}')
             data = json.loads(data_str)
             garments_info = data.get('garments', [])
-            logger.info(f"✅ [G3] JSON 解析成功: 收到 {len(garments_info)} 件衣物資訊")
+            timings['json_parse'] = time.time() - step1_start
+            logger.info(f"✅ [G3] JSON 解析成功: 收到 {len(garments_info)} 件衣物資訊 (耗時: {timings['json_parse']:.2f}s)")
         except Exception as e:
             # 2400: 缺少輸入參數或格式錯誤
             logger.error(f"❌ [G3] JSON 解析失敗: {str(e)}")
@@ -155,20 +158,42 @@ class TryCombineView(View):
 
         try:
             logger.info("⏳ [G3] 初始化 AIProcessor 並進行圖片指標重置...")
+            step2_start = time.time()
             processor = AIProcessor()
             model_image.seek(0)
             for g in garment_images: 
                 g.seek(0)
-            logger.info(f"✅ [G3] 指標重置完成，Model 圖片名稱: {model_image.name}")
+            timings['init'] = time.time() - step2_start
+            logger.info(f"✅ [G3] 指標重置完成，Model 圖片名稱: {model_image.name} (耗時: {timings['init']:.2f}s)")
 
-            # ========== 步驟 3: 款式分析 ==========
-            # 這是第一階段 AI 分析
-            logger.info("⏳ [G3] 啟動 tool_garment_analysis (衣物風格分析)...")
-            analysis_start = time.time()
+            # ========== 步驟 3 & 4: 並行處理 (衣物分析 + 圖片轉換) ==========
+            step3_start = time.time()
+            logger.info("⏳ [G3] 啟動並行處理：衣物風格分析 + 模型圖片預處理...")
+            
+            def _analyze_garments():
+                try:
+                    return processor.tool_garment_analysis(garment_images, data)
+                except Exception as e:
+                    logger.exception(f"❌ 衣物分析異常: {str(e)}")
+                    raise
+
+            def _prepare_model_image():
+                try:
+                    return Image.open(model_image).convert("RGB")
+                except Exception as e:
+                    logger.exception(f"❌ 圖片轉換異常: {str(e)}")
+                    raise
+
             try:
-                garments_ctx, consult_status = processor.tool_garment_analysis(garment_images, data)
+                with ThreadPoolExecutor(max_workers=2) as executor:
+                    fut_garment = executor.submit(_analyze_garments)
+                    fut_image = executor.submit(_prepare_model_image)
+                    
+                    # 等待兩個結果
+                    garments_ctx, consult_status = fut_garment.result()
+                    pil_raw = fut_image.result()
                 
-                # 關鍵修正：檢查 tool_garment_analysis 是否回傳失敗狀態
+                # 檢查衣物分析結果
                 if consult_status == "fail":
                     logger.error("❌ [G3] tool_garment_analysis 回傳失敗狀態")
                     return JsonResponse({
@@ -177,22 +202,20 @@ class TryCombineView(View):
                         "debug_info": {"suggest": garments_ctx.get('suggest', "AI 分析服務異常")}
                     }, status=500)
                 
-                logger.info(f"✅ [G3] Style 分析完成，耗時: {round(time.time() - analysis_start, 2)}s")
+                timings['parallel_step'] = time.time() - step3_start
+                logger.info(f"✅ [G3] 並行處理完成 (衣物分析 + 圖片轉換)，耗時: {timings['parallel_step']:.2f}s")
+                
             except Exception as e:
-                logger.exception(f"💥 [G3] Style 分析階段發生未預期錯誤: {str(e)}")
+                logger.exception(f"💥 [G3] 並行處理階段發生未預期錯誤: {str(e)}")
                 return JsonResponse({
                     "code": 500,
                     "message": "2500",
                     "debug_info": {"suggest": f"AI 分析服務異常: {str(e)}"}
                 }, status=500)
 
-            # ========== 步驟 4: 影像優化 ==========
-            logger.info("⏳ [G3] 正在轉換 Model 圖片為 RGB 格式...")
-            pil_raw = Image.open(model_image).convert("RGB")
-
             # ========== 步驟 5: 核心合成 ==========
+            step5_start = time.time()
             logger.info("🚀 [G3] 開始核心合成流程 (virtual_try_on)...")
-            vto_start = time.time()
             
             # 正確拆解 Tuple: (result 字典, status 字串)
             result, status = processor.virtual_try_on(
@@ -200,6 +223,9 @@ class TryCombineView(View):
                 garments_ctx=garments_ctx,
                 user_data=data
             )
+            
+            timings['vto_core'] = time.time() - step5_start
+            logger.info(f"⏳ [G3] 核心合成耗時: {timings['vto_core']:.2f}s")
             
             # 處理未偵測到人體 (2422) 或其他合成錯誤 (2501)
             if status == "fail":
@@ -223,8 +249,12 @@ class TryCombineView(View):
 
             # ========== 步驟 7: 合成後的風格分析 ==========
             # 呼叫分析函式，若失敗 code 為 "2504"
+            step7_start = time.time()
             logger.info("⏳ [G3] 啟動合成後穿搭風格分析 (mode=outfit)...")
             style_result, outfit_success, outfit_code, outfit_err = processor.analyze_clothing_style(final_image, mode="outfit")
+
+            timings['outfit_analysis'] = time.time() - step7_start
+            logger.info(f"⏳ [G3] 風格分析耗時: {timings['outfit_analysis']:.2f}s")
 
             # 2. 處理 style_name (確保拿到的是整個列表)
             if outfit_success:
@@ -276,7 +306,13 @@ class TryCombineView(View):
             
             # 計算整體流程時間
             duration = round(time.time() - start_time, 2)
-            logger.info(f"🎉 [G3] 虛擬試穿流程圓滿結束！總耗時: {duration}s")
+            timings['total'] = duration
+            
+            # 詳細時間分解日誌
+            timing_details = " | ".join([f"{k}: {v:.2f}s" for k, v in timings.items()])
+            logger.info(f"🎉 [G3] 虛擬試穿流程圓滿結束！")
+            logger.info(f"   ⏱️ 時間分解: {timing_details}")
+            logger.info(f"   📊 總耗時: {duration}s")
             
             return HttpResponse(b''.join(response_body), content_type=f'multipart/mixed; boundary={boundary}')
 

@@ -33,13 +33,6 @@ class AIProcessor(ImageProcessingInterface):
         # 從環境變數獲取 Google API Key
         self.api_key = os.getenv("GOOGLE_API_KEY")
         
-        # 第一次嘗試初始化預設的 rembg session
-        try:
-            self.rembg_session = new_session()
-        except Exception as e:
-            logger.warning(f"rembg session 初始化失敗: {e}")
-            self.rembg_session = None
-
         # 初始化 Google GenAI Client
         try:
             self.client = genai.Client(api_key=self.api_key) if self.api_key else None
