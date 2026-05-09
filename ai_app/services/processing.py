@@ -493,6 +493,275 @@ class AIProcessor(ImageProcessingInterface):
     
        
 
+    # ==========================================
+    # 3D 物理試穿：Tripo image-to-3D 各別功能函式
+    # 由 view 編排呼叫；機密與設定一律走 .env
+    # 統一回傳: (data, status, code, err_msg)
+    #   - data: 該步驟產出 (token / task_id / model_url / glb bytes)
+    #   - status: "success" / "fail"
+    #   - code: "4xxx"
+    #   - err_msg: 錯誤訊息或 None
+    # ==========================================
+
+    def _tripo_config(self):
+        """從 .env 讀取 Tripo 設定 (集中管理機密與參數)"""
+        return {
+            "api_key": os.getenv("TRIPO_API_KEY"),
+            "base_url": os.getenv("TRIPO_BASE_URL", "https://api.tripo3d.ai/v2/openapi"),
+            "upload_timeout": int(os.getenv("TRIPO_UPLOAD_TIMEOUT", "60")),
+            "task_timeout": int(os.getenv("TRIPO_TASK_TIMEOUT", "60")),
+            "poll_timeout": int(os.getenv("TRIPO_POLL_TIMEOUT", "30")),
+            "download_timeout": int(os.getenv("TRIPO_DOWNLOAD_TIMEOUT", "120")),
+            "poll_max_seconds": int(os.getenv("TRIPO_POLL_MAX_SECONDS", "600")),
+            "poll_interval": int(os.getenv("TRIPO_POLL_INTERVAL", "5")),
+        }
+
+    def tripo_upload_image(self, pil_image):
+        """[3D-Step1] 上傳圖片至 Tripo，回傳 file_token"""
+        import requests as _req
+        cfg = self._tripo_config()
+        if not cfg["api_key"]:
+            return None, "fail", "4500", "TRIPO_API_KEY not configured"
+
+        try:
+            buf = io.BytesIO()
+            pil_image.convert("RGB").save(buf, format="PNG")
+            buf.seek(0)
+
+            r = _req.post(
+                f"{cfg['base_url']}/upload",
+                headers={"Authorization": f"Bearer {cfg['api_key']}"},
+                files={"file": ("input.png", buf, "image/png")},
+                timeout=cfg["upload_timeout"],
+            )
+            if r.status_code != 200:
+                return None, "fail", "4500", f"Tripo upload HTTP {r.status_code}: {r.text[:200]}"
+
+            file_token = (r.json().get("data") or {}).get("image_token")
+            if not file_token:
+                return None, "fail", "4500", f"Tripo upload returned no image_token: {r.text[:200]}"
+            return file_token, "success", "4200", None
+        except _req.exceptions.RequestException as e:
+            return None, "fail", "4500", f"Tripo upload network error: {str(e)}"
+        except Exception as e:
+            return None, "fail", "4500", f"Tripo upload crashed: {str(e)}"
+
+    # ---------- Tripo 預設指令 (追求「跟輸入圖一模一樣」) ----------
+    TRIPO_DEFAULT_PROMPT = (
+        "photorealistic 3D character, exact replica of the input photo, "
+        "preserve identical facial features, identity, hairstyle, skin tone, "
+        "preserve exact clothing design, fabric color, patterns, logos, wrinkles, "
+        "preserve body proportions and silhouette, sharp clean outline, "
+        "realistic colors matching the source image, no color shift, "
+        "high-fidelity texture, accurate detail reproduction, "
+        "neutral A-pose, full body"
+    )
+    TRIPO_DEFAULT_NEGATIVE_PROMPT = (
+        "cartoon, anime, stylized, deformed, distorted, blurry, "
+        "oversmooth, plastic skin, color shift, saturated, washed out, "
+        "extra limbs, missing limbs, asymmetric face, melted features, "
+        "artistic interpretation, fantasy elements"
+    )
+    TRIPO_DEFAULT_TEXTURE_QUALITY = "detailed"
+    TRIPO_DEFAULT_FACE_LIMIT = 100000  # 一次到位 (refine_model 不支援 image_to_model 來源)
+    TRIPO_DEFAULT_PBR = True
+    TRIPO_DEFAULT_MODEL_VERSION = "v2.5-20250123"       # Tripo 官方有效版本字串
+    TRIPO_DEFAULT_TEXTURE_ALIGNMENT = "original_image"  # 貼圖嚴格對齊原圖
+    TRIPO_DEFAULT_GEOMETRY_QUALITY = "detailed"         # 幾何品質 (跟 texture_quality 並列)
+    # Refine 階段預設參數 (image_to_model 結果再精修)
+    TRIPO_REFINE_FACE_LIMIT = 200000
+
+    def tripo_create_task(self, file_token, prompt=None, negative_prompt=None,
+                          texture_quality=None, face_limit=None, pbr=None, style=None):
+        """[3D-Step2] 建立 image_to_model 任務，回傳 task_id
+
+        所有參數皆選填；未填則套用「最大化還原原圖」的預設值：
+          prompt: 預設 TRIPO_DEFAULT_PROMPT (寫實還原 + 衣物保留 + 顏色精準)
+          negative_prompt: 預設 TRIPO_DEFAULT_NEGATIVE_PROMPT (擋掉卡通/變形/偏色)
+          texture_quality: 預設 "detailed"
+          face_limit: 預設 30000 (高面數 → 精細輪廓)
+          pbr: 預設 True (PBR 材質 → 寫實光照)
+          style: 預設不啟用 (避免風格化)
+        """
+        import requests as _req
+        cfg = self._tripo_config()
+        if not cfg["api_key"]:
+            return None, "fail", "4500", "TRIPO_API_KEY not configured"
+
+        # 套用預設值 (None = 用預設；空字串也視為未填)
+        eff_prompt = prompt if prompt else self.TRIPO_DEFAULT_PROMPT
+        eff_neg = negative_prompt if negative_prompt else self.TRIPO_DEFAULT_NEGATIVE_PROMPT
+        eff_tex_q = texture_quality if texture_quality else self.TRIPO_DEFAULT_TEXTURE_QUALITY
+        eff_face = int(face_limit) if face_limit else self.TRIPO_DEFAULT_FACE_LIMIT
+        eff_pbr = pbr if pbr is not None else self.TRIPO_DEFAULT_PBR
+
+        logger.info(f"🧾 [3D] Tripo 任務參數: prompt='{eff_prompt[:60]}...', "
+                    f"neg='{eff_neg[:40]}...', tex_q={eff_tex_q}, "
+                    f"face_limit={eff_face}, pbr={eff_pbr}, style={style}")
+
+        try:
+            payload = {
+                "type": "image_to_model",
+                "file": {"type": "png", "file_token": file_token},
+                "prompt": eff_prompt,
+                "negative_prompt": eff_neg,
+                "texture_quality": eff_tex_q,
+                "face_limit": eff_face,
+                "pbr": eff_pbr,
+                "model_version": self.TRIPO_DEFAULT_MODEL_VERSION,
+                "texture_alignment": self.TRIPO_DEFAULT_TEXTURE_ALIGNMENT,
+                "geometry_quality": self.TRIPO_DEFAULT_GEOMETRY_QUALITY,
+            }
+            if style:
+                payload["style"] = style
+
+            r = _req.post(
+                f"{cfg['base_url']}/task",
+                headers={
+                    "Authorization": f"Bearer {cfg['api_key']}",
+                    "Content-Type": "application/json",
+                },
+                json=payload,
+                timeout=cfg["task_timeout"],
+            )
+            if r.status_code != 200:
+                return None, "fail", "4500", f"Tripo create task HTTP {r.status_code}: {r.text[:200]}"
+
+            task_id = (r.json().get("data") or {}).get("task_id")
+            if not task_id:
+                return None, "fail", "4500", f"Tripo task returned no task_id: {r.text[:200]}"
+            return task_id, "success", "4200", None
+        except _req.exceptions.RequestException as e:
+            return None, "fail", "4500", f"Tripo create task network error: {str(e)}"
+        except Exception as e:
+            return None, "fail", "4500", f"Tripo create task crashed: {str(e)}"
+
+    def tripo_create_refine_task(self, draft_task_id, face_limit=None,
+                                 prompt=None, negative_prompt=None,
+                                 texture_quality=None, pbr=None):
+        """[3D-Step3.5] 用 draft task_id 建立 refine_model 精修任務 (200k 面 + 高品質貼圖)。
+
+        會額外消耗 1 次 Tripo credit。
+
+        預設套用最高品質：
+          face_limit: 200000
+          texture_quality: detailed
+          pbr: True
+          prompt / negative_prompt: 同 image_to_model 預設 (一致還原)
+        """
+        import requests as _req
+        cfg = self._tripo_config()
+        if not cfg["api_key"]:
+            return None, "fail", "4500", "TRIPO_API_KEY not configured"
+
+        eff_face = int(face_limit) if face_limit else self.TRIPO_REFINE_FACE_LIMIT
+        eff_tex_q = texture_quality if texture_quality else self.TRIPO_DEFAULT_TEXTURE_QUALITY
+        eff_pbr = pbr if pbr is not None else self.TRIPO_DEFAULT_PBR
+        eff_prompt = prompt if prompt else self.TRIPO_DEFAULT_PROMPT
+        eff_neg = negative_prompt if negative_prompt else self.TRIPO_DEFAULT_NEGATIVE_PROMPT
+
+        logger.info(f"🧾 [3D] Refine 任務參數: draft={draft_task_id}, face_limit={eff_face}, "
+                    f"tex_q={eff_tex_q}, pbr={eff_pbr}, prompt='{eff_prompt[:50]}...'")
+
+        try:
+            payload = {
+                "type": "refine_model",
+                "draft_model_task_id": draft_task_id,
+                "face_limit": eff_face,
+                "texture_quality": eff_tex_q,
+                "pbr": eff_pbr,
+                "texture": True,
+                "texture_alignment": self.TRIPO_DEFAULT_TEXTURE_ALIGNMENT,
+                "prompt": eff_prompt,
+                "negative_prompt": eff_neg,
+            }
+            r = _req.post(
+                f"{cfg['base_url']}/task",
+                headers={
+                    "Authorization": f"Bearer {cfg['api_key']}",
+                    "Content-Type": "application/json",
+                },
+                json=payload,
+                timeout=cfg["task_timeout"],
+            )
+            if r.status_code != 200:
+                return None, "fail", "4500", f"Tripo refine HTTP {r.status_code}: {r.text[:200]}"
+
+            task_id = (r.json().get("data") or {}).get("task_id")
+            if not task_id:
+                return None, "fail", "4500", f"Tripo refine returned no task_id: {r.text[:200]}"
+            return task_id, "success", "4200", None
+        except _req.exceptions.RequestException as e:
+            return None, "fail", "4500", f"Tripo refine network error: {str(e)}"
+        except Exception as e:
+            return None, "fail", "4500", f"Tripo refine crashed: {str(e)}"
+
+    def tripo_poll_task(self, task_id, progress_cb=None):
+        """[3D-Step3] 同步輪詢任務狀態，完成後回傳 model_url
+        progress_cb(status, progress) 可選；當 progress 變化時呼叫，方便 view 印 log"""
+        import requests as _req
+        cfg = self._tripo_config()
+        if not cfg["api_key"]:
+            return None, "fail", "4500", "TRIPO_API_KEY not configured"
+
+        poll_url = f"{cfg['base_url']}/task/{task_id}"
+        headers = {"Authorization": f"Bearer {cfg['api_key']}"}
+        deadline = time.time() + cfg["poll_max_seconds"]
+        last_progress = -1
+
+        try:
+            while time.time() < deadline:
+                rp = _req.get(poll_url, headers=headers, timeout=cfg["poll_timeout"])
+                if rp.status_code != 200:
+                    time.sleep(cfg["poll_interval"])
+                    continue
+
+                pj = rp.json().get("data") or {}
+                status = pj.get("status")
+                progress = pj.get("progress", 0)
+
+                if progress_cb and progress != last_progress:
+                    try:
+                        progress_cb(status, progress)
+                    except Exception:
+                        pass
+                    last_progress = progress
+
+                if status == "success":
+                    out = pj.get("output") or {}
+                    pbr = out.get("pbr_model")
+                    model_url = (pbr.get("url") if isinstance(pbr, dict) else pbr) \
+                        or out.get("model") or out.get("base_model")
+                    if not model_url:
+                        return None, "fail", "4500", "Tripo task success but no model url"
+                    return model_url, "success", "4200", None
+
+                if status in ("failed", "cancelled", "banned", "expired"):
+                    err = pj.get("error") or pj.get("message") or status
+                    return None, "fail", "4422", f"Tripo task {status}: {err}"
+
+                time.sleep(cfg["poll_interval"])
+
+            return None, "fail", "4500", "Tripo task polling timeout"
+        except _req.exceptions.RequestException as e:
+            return None, "fail", "4500", f"Tripo poll network error: {str(e)}"
+        except Exception as e:
+            return None, "fail", "4500", f"Tripo poll crashed: {str(e)}"
+
+    def tripo_download_model(self, model_url):
+        """[3D-Step4] 下載 .glb，回傳 bytes"""
+        import requests as _req
+        cfg = self._tripo_config()
+        try:
+            r = _req.get(model_url, timeout=cfg["download_timeout"])
+            if r.status_code != 200:
+                return None, "fail", "4500", f"Tripo download HTTP {r.status_code}"
+            return r.content, "success", "4200", None
+        except _req.exceptions.RequestException as e:
+            return None, "fail", "4500", f"Tripo download network error: {str(e)}"
+        except Exception as e:
+            return None, "fail", "4500", f"Tripo download crashed: {str(e)}"
+
     def remove_background_2d(self, pil_image):
         """
         純 2D 去背，並檢查人體完整度
