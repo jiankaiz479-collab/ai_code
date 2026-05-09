@@ -7,6 +7,7 @@ import logging
 import requests  # 加上這一行
 from PIL import Image, ImageEnhance
 from django.conf import settings
+from concurrent.futures import ThreadPoolExecutor
 from django.http import JsonResponse, HttpResponse
 from django.views import View
 from django.utils.decorators import method_decorator
@@ -24,61 +25,62 @@ import time  # 👈 就是漏掉這一行！
 # 取得日誌記錄器
 logger = logging.getLogger(__name__)
 
+
+def _timed(fn, *args, **kwargs):
+    t = time.time()
+    return fn(*args, **kwargs), time.time() - t
 @method_decorator(csrf_exempt, name='dispatch')
 class RemoveBgView(View):
+    """
+    1. 去背功能 (Remove Background)
+    加速邏輯：採用 ThreadPoolExecutor 讓去背與 Gemini 分析並行執行。
+    """
+    def _run_parallel(self, processor, input_pil):
+        """並行執行核心：去背與分析同時啟動"""
+        t_total = time.time()
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            # 同時發送去背與分析請求
+            fut_bg = executor.submit(_timed, processor.remove_background, input_pil)
+            fut_style = executor.submit(_timed, processor.analyze_clothing_style, input_pil)
+            
+            # 獲取結果
+            (output_img, ok_bg, code_bg, err_bg), bg_dt = fut_bg.result()
+            (style, ok_style, code_style, err_style), style_dt = fut_style.result()
+            
+        total_dt = time.time() - t_total
+        
+        if not ok_bg:
+            raise RuntimeError(f"1500|{code_bg}|{err_bg}")
+        if not ok_style:
+            raise RuntimeError(f"1501|1501|{err_style}")
+
+        # 處理完成後才進行 IO 存檔
+        file_name, file_path = processor.get_unique_filename(prefix="processed", ext="png")
+        output_img.save(file_path, "PNG")
+
+        return output_img, style, file_name, file_path, {
+            "bg": bg_dt, "style": style_dt, "total": total_dt
+        }
+
     def post(self, request, *args, **kwargs):
-        # 紀錄請求開始時間
         start_time = time.time()
-        logger.info("--- [G2] 接收到去背請求 (RemoveBgView POST) ---")
-        
+        logger.info("--- [G2] 接收到去背請求 (並行加速模式) ---")
+
         clothes_image = request.FILES.get('clothes_image')
-        
-        # --- 基礎檢查 1400 / 1415 ---
         if not clothes_image:
-            logger.warning("❌ [G2] 請求失敗: 未偵測到上傳圖片 (1400)")
             return JsonResponse({"code": 400, "message": "1400"}, status=400)
         
         if not clothes_image.content_type.startswith('image/'):
-            logger.warning(f"❌ [G2] 請求失敗: 不支援的檔案格式 {clothes_image.content_type} (1415)")
             return JsonResponse({"code": 415, "message": "1415"}, status=415)
 
         try:
-            # 初始化處理器
-            logger.info("⏳ [G2] 正在初始化 AIProcessor...")
             processor = AIProcessor()
-            
-            if hasattr(clothes_image, 'seek'): 
-                clothes_image.seek(0)
             input_pil = Image.open(clothes_image).convert("RGBA")
-            logger.info(f"✅ [G2] 圖片讀取成功 (大小: {input_pil.size})")
 
-            # --- 第一關：去背處理 [1500] ---
-            logger.info("⏳ [G2] 開始執行去背處理 (RemBG)...")
-            output_img, success, code, err = processor.remove_background(input_pil)
-            
-            if not success: 
-                logger.error(f"❌ [G2] 去背失敗: 代碼 {code}, 錯誤: {err}")
-                return JsonResponse({"code": 500, "message": code, "err": err}, status=500)
-            
-            logger.info("✅ [G2] 去背完成，成功移除背景")
+            # 執行並行加速處理
+            output_img, style_analysis, file_name, file_path, timings = self._run_parallel(processor, input_pil)
 
-            # 暫存去背後的圖供後續分析
-            file_name, file_path = processor.get_unique_filename(prefix="processed", ext="png")
-            output_img.save(file_path, "PNG")
-            logger.info(f"💾 [G2] 處理後的圖片已存至: {file_path}")
-
-            # --- 第三關：時尚風格分析 [1501] ---
-            logger.info("⏳ [G2] 開始執行 Gemini 時尚風格分析 (1501)...")
-            style_analysis, success, code, err = processor.analyze_clothing_style(file_path)
-            
-            if not success: 
-                logger.error(f"❌ [G2] 風格分析失敗: 1501, 錯誤細節: {err}")
-                return JsonResponse({"code": 500, "message": "1501", "err": err}, status=500)
-            
-            logger.info(f"✅ [G2] 分析結果取得成功: {style_analysis.get('clothes_category')}")
-
-            # ========== [成功回覆: 1200 OK] ==========
-            # 保持原本的結構：data 內包含 style_analysis
+            # 封裝 JSON
             analysis_data = {
                 "code": 200,
                 "message": "1200",
@@ -88,30 +90,22 @@ class RemoveBgView(View):
                 }
             }
             json_pretty = json.dumps(analysis_data, indent=4, ensure_ascii=False)
-            logger.debug(f"📊 [G2] 準備回傳 JSON 資料內容:\n{json_pretty}")
 
-            # --- 封裝 Multipart 回傳格式 ---
+            # 封裝 Multipart 響應
             boundary = 'bg_removal_boundary'
-            logger.info("⏳ [G2] 正在封裝 Multipart/mixed 響應...")
-            
             response_body = [
                 f'--{boundary}\r\nContent-Disposition: form-data; name="analysis"\r\nContent-Type: application/json\r\n\r\n{json_pretty}\r\n'.encode('utf-8'),
                 f'--{boundary}\r\nContent-Disposition: form-data; name="processed_image"; filename="{file_name}"\r\nContent-Type: image/png\r\n\r\n'.encode('utf-8')
             ]
-            
             with open(file_path, 'rb') as f:
                 response_body.append(f.read())
             response_body.append(f'\r\n--{boundary}--\r\n'.encode('utf-8'))
-            
-            # 計算總耗時
-            duration = round(time.time() - start_time, 2)
-            logger.info(f"🎉 [G2] 流程全部順利完成！總耗時: {duration} 秒")
-            
+
+            logger.info(f"🎉 去背完成！總耗時: {time.time()-start_time:.2f}s (並行節省了約 {min(timings['bg'], timings['style']):.2f}s)")
             return HttpResponse(b''.join(response_body), content_type=f'multipart/form-data; boundary={boundary}')
 
         except Exception as e:
-            # 攔截所有未預期的崩潰
-            logger.exception(f"💥 [G2] 伺服器內部系統崩潰: {str(e)}")
+            logger.exception(f"💥 處理崩潰: {str(e)}")
             return JsonResponse({"code": 500, "message": "1500", "debug": str(e)}, status=500)
 # ==========================================
 # 2. 虛擬試穿 (Virtual Try-On)
