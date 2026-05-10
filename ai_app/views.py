@@ -408,3 +408,227 @@ class ReconstructView(View):
                 "message": "3500",
                 "debug_info": {"error_detail": f"Server crash or heavy load: {str(e)}"}
             }, status=500)
+
+
+# ==========================================
+# 4. 3D 物理試穿 (Tripo image-to-3D)
+# 輸入: model_image (單張圖)
+# 輸出: multipart/mixed (JSON + .glb)
+# 錯誤碼: 4200 / 4400 / 4422 / 4500
+# ==========================================
+@method_decorator(csrf_exempt, name='dispatch')
+class Reconstruct_3D(View):
+    def post(self, request, *args, **kwargs):
+        start_time = time.time()
+        logger.info("--- [G4] 接收到 3D 重建請求 (Tripo) ---")
+
+        # ========== 步驟 1: 接收圖片與 data JSON (4400) ==========
+        model_image = request.FILES.get('model_image')
+        if not model_image:
+            logger.warning("❌ [G4] 缺少 model_image (message=4400)")
+            return JsonResponse({
+                "code": 400,
+                "message": "4400",
+                "debug_info": {"error_detail": "Missing model_image file."}
+            }, status=400)
+
+        # 解析 data JSON (model_info / garments)
+        # 目前僅紀錄、暫不傳給 Tripo；未來物理布料模擬 / 尺寸換算會用到
+        data = {}
+        model_info = {}
+        garments_info = []
+        data_str = request.POST.get('data', '').strip()
+        if data_str:
+            try:
+                data = json.loads(data_str)
+                model_info = data.get('model_info', {}) or {}
+                garments_info = data.get('garments', []) or []
+                logger.info("📥 [G4] data JSON 解析成功")
+            except json.JSONDecodeError as e:
+                logger.warning(f"❌ [G4] data JSON 解析失敗 (message=4400): {e}")
+                return JsonResponse({
+                    "code": 400,
+                    "message": "4400",
+                    "debug_info": {"error_detail": f"Invalid JSON in 'data' field: {str(e)}"}
+                }, status=400)
+        else:
+            logger.info("📥 [G4] 未提供 data，使用預設流程 (僅圖片)")
+
+        # 業務碼 → (HTTP 狀態, 預設提示文案)
+        _CODE_MAP = {
+            "4400": (400, "Missing or invalid input parameters."),
+            "4410": (402, "Insufficient credits. Please top up and try again."),
+            "4415": (415, "Unsupported file format. Please upload a valid JPG/PNG image."),
+            "4422": (422, "Please ensure your full body and all limbs are visible in the photo."),
+            "4429": (429, "3D service is busy (rate limited). Please try again later."),
+            "4500": (500, "3D reconstruction service is overloaded or crashed."),
+        }
+
+        def _fail_response(code, err_msg):
+            http_status, default_detail = _CODE_MAP.get(code, (500, "Unknown error."))
+            detail = err_msg or default_detail
+            logger.error(f"❌ [G4] 失敗 message={code} http={http_status} detail={detail}")
+            return JsonResponse({
+                "code": http_status,
+                "message": code,
+                "debug_info": {"error_detail": detail}
+            }, status=http_status)
+
+        try:
+            processor = AIProcessor()
+            model_image.seek(0)
+            pil_img = Image.open(model_image).convert("RGBA")
+            logger.info("✅ [G4] 圖片載入成功")
+
+            # ========== Mock 模式: 不呼叫 Tripo，直接讀預設 GLB ==========
+            debug_mock = os.getenv("TRIPO_DEBUG_MOCK", "false").lower() in ("1", "true", "yes")
+            if debug_mock:
+                mock_name = os.getenv("TRIPO_MOCK_GLB_NAME", "model3d_2ce2ec84.glb")
+                mock_path = os.path.join(settings.MEDIA_ROOT, "tripo", mock_name)
+                logger.info("🧪 [G4] Mock 模式啟用，跳過 Tripo API")
+                if not os.path.exists(mock_path):
+                    return _fail_response("4500", f"Mock GLB not found: {mock_path}")
+                with open(mock_path, "rb") as f:
+                    glb_bytes = f.read()
+                file_name = mock_name
+                logger.info("✅ [G4] Mock GLB 載入成功")
+
+                analysis_data = {
+                    "code": 200,
+                    "message": "4200",
+                    "data": {
+                        "file_name": file_name,
+                        "file_format": "GLB",
+                    }
+                }
+                boundary = 'frame_boundary'
+                response_body = []
+                response_body.append(f'--{boundary}\r\nContent-Type: application/json\r\n\r\n'.encode('utf-8'))
+                response_body.append(json.dumps(analysis_data, indent=2, ensure_ascii=False).encode('utf-8'))
+                response_body.append(b'\r\n')
+                response_body.append(f'--{boundary}\r\nContent-Type: model/gltf-binary\r\n'.encode('utf-8'))
+                response_body.append(f'Content-Disposition: attachment; filename="{file_name}"\r\n\r\n'.encode('utf-8'))
+                response_body.append(glb_bytes)
+                response_body.append(b'\r\n')
+                response_body.append(f'--{boundary}--\r\n'.encode('utf-8'))
+
+                logger.info("🎉 [G4] 3D 重建完成 (MOCK)")
+                return HttpResponse(b''.join(response_body), content_type=f'multipart/mixed; boundary={boundary}')
+
+            # ========== Step 1: 上傳圖片至 Tripo ==========
+            logger.info("🚀 [G4] Step1: 上傳圖片至 Tripo...")
+            file_token, st, code, err = processor.tripo_upload_image(pil_img)
+            if st != "success":
+                return _fail_response(code, err)
+            logger.info("✅ [G4] Step1 完成")
+
+            # ========== Step 2: 建立任務 (支援 prompt 等自然語言指令) ==========
+            prompt = (request.POST.get('prompt') or '').strip() or None
+            negative_prompt = (request.POST.get('negative_prompt') or '').strip() or None
+            texture_quality = (request.POST.get('texture_quality') or '').strip() or None
+            face_limit = request.POST.get('face_limit') or None
+            pbr_raw = request.POST.get('pbr')
+            pbr = None if pbr_raw is None else pbr_raw.lower() in ('1', 'true', 'yes')
+            style = (request.POST.get('style') or '').strip() or None
+
+            logger.info("🚀 [G4] Step2: 建立 image_to_model 任務...")
+            task_id, st, code, err = processor.tripo_create_task(
+                file_token,
+                prompt=prompt,
+                negative_prompt=negative_prompt,
+                texture_quality=texture_quality,
+                face_limit=face_limit,
+                pbr=pbr,
+                style=style,
+            )
+            if st != "success":
+                return _fail_response(code, err)
+            logger.info("✅ [G4] Step2 完成")
+
+            # ========== Step 3: 輪詢任務 ==========
+            logger.info("⏳ [G4] Step3: 輪詢任務...")
+            model_url, st, code, err = processor.tripo_poll_task(task_id)
+            if st != "success":
+                return _fail_response(code, err)
+            logger.info("✅ [G4] Step3 完成")
+
+            # ========== Step 3.5: Refine (200k 面精修，可關閉) ==========
+            # 預設開啟；可由 .env TRIPO_ENABLE_REFINE=false 關閉，或 POST refine=false 覆蓋
+            env_refine = os.getenv("TRIPO_ENABLE_REFINE", "true").lower() in ("1", "true", "yes")
+            req_refine = request.POST.get("refine")
+            if req_refine is not None:
+                enable_refine = req_refine.lower() in ("1", "true", "yes")
+            else:
+                enable_refine = env_refine
+
+            refine_face_limit = request.POST.get("refine_face_limit") or None
+
+            if enable_refine:
+                logger.info("🚀 [G4] Step3.5: 建立 Refine 任務...")
+                refine_task_id, st, code, err = processor.tripo_create_refine_task(
+                    draft_task_id=task_id,
+                    face_limit=refine_face_limit,
+                    prompt=prompt,
+                    negative_prompt=negative_prompt,
+                    texture_quality=texture_quality,
+                    pbr=pbr,
+                )
+                if st != "success":
+                    return _fail_response(code, err)
+
+                refined_url, st, code, err = processor.tripo_poll_task(refine_task_id)
+                if st != "success":
+                    return _fail_response(code, err)
+                model_url = refined_url
+                logger.info("✅ [G4] Step3.5 完成")
+            else:
+                logger.info("⏭️ [G4] Step3.5: 已停用 Refine")
+
+            # ========== Step 4: 下載 .glb ==========
+            logger.info("🚀 [G4] Step4: 下載 .glb...")
+            glb_bytes, st, code, err = processor.tripo_download_model(model_url)
+            if st != "success":
+                return _fail_response(code, err)
+            logger.info("✅ [G4] Step4 完成")
+
+            # ========== Step 5: 存檔 (.glb 落地到 media/3d/) ==========
+            glb_dir = os.path.join(settings.MEDIA_ROOT, "tripo")
+            os.makedirs(glb_dir, exist_ok=True)
+            file_name = f"model3d_{uuid.uuid4().hex[:8]}.glb"
+            file_path = os.path.join(glb_dir, file_name)
+            with open(file_path, 'wb') as f:
+                f.write(glb_bytes)
+            logger.info("✅ [G4] Step5 存檔完成")
+
+            # ========== Step 6: 構建 Multipart 響應 ==========
+            analysis_data = {
+                "code": 200,
+                "message": "4200",
+                "data": {
+                    "file_name": file_name,
+                    "file_format": "GLB"
+                }
+            }
+
+            boundary = 'frame_boundary'
+            response_body = []
+            response_body.append(f'--{boundary}\r\nContent-Type: application/json\r\n\r\n'.encode('utf-8'))
+            response_body.append(json.dumps(analysis_data, indent=2, ensure_ascii=False).encode('utf-8'))
+            response_body.append(b'\r\n')
+            response_body.append(f'--{boundary}\r\nContent-Type: model/gltf-binary\r\n'.encode('utf-8'))
+            response_body.append(f'Content-Disposition: attachment; filename="{file_name}"\r\n\r\n'.encode('utf-8'))
+            response_body.append(glb_bytes)
+            response_body.append(b'\r\n')
+            response_body.append(f'--{boundary}--\r\n'.encode('utf-8'))
+
+            logger.info("🎉 [G4] 3D 重建完成")
+            return HttpResponse(b''.join(response_body), content_type=f'multipart/mixed; boundary={boundary}')
+
+        except Exception as e:
+            detail = f"Server crash or heavy load: {str(e)}"
+            logger.exception(f"💥 [G4] 3D 流程崩潰 (message=4500): {detail}")
+            return JsonResponse({
+                "code": 500,
+                "message": "4500",
+                "debug_info": {"error_detail": detail}
+            }, status=500)
