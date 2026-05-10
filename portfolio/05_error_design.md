@@ -1,0 +1,156 @@
+# 05. API 錯誤碼設計
+
+> 這份文件記錄「錯誤處理」的工程設計，這是教授判斷你**是不是工程師**而不是「只會 demo」的一個關鍵指標。
+
+---
+
+## 一個常見的反例（很多學生會犯的錯）
+
+```python
+# ❌ 別人會這樣寫
+try:
+    result = call_ai()
+    return JsonResponse({"data": result})
+except Exception as e:
+    return JsonResponse({"error": str(e)}, status=500)
+```
+
+**問題**：
+1. 所有錯誤都變 500 → 前端不知道是「使用者輸入錯」還是「服務崩潰」
+2. `str(e)` 直接吐給前端 → **資安漏洞**（暴露內部結構）
+3. 沒有業務碼 → 前端要靠 string match 判斷錯誤類型
+
+---
+
+## 我的設計：3 層錯誤架構
+
+### 第 1 層：HTTP Status Code（標準）
+- 200 / 400 / 402 / 415 / 422 / 429 / 500
+- 給 client 端、CDN、proxy 看
+
+### 第 2 層：業務錯誤碼（自訂 4 位數）
+- `1xxx` = 去背模組
+- `2xxx` = 試穿模組
+- `3xxx` = 人像標準化模組
+- `4xxx` = 3D 重建模組
+
+格式：`<模組碼><HTTP尾碼>`，例如 `4422` = 4 模組 + 422 (Unprocessable)。
+
+### 第 3 層：debug_info.error_detail（給工程師）
+- 給開發/除錯用
+- 包含 stage、上游錯誤碼、上游訊息
+
+### 統一回應格式
+```json
+{
+  "code": 422,
+  "message": "4422",
+  "debug_info": {
+    "error_detail": "[poll] Reconstruction rejected (code=2018): mesh too complex"
+  }
+}
+```
+
+---
+
+## 3D 模組的 6 段式錯誤碼
+
+| message | HTTP | 觸發情境 | 前端 UI 行為 |
+|---|---|---|---|
+| `4200` | 200 | 成功 | 顯示 3D 模型 |
+| `4400` | 400 | 缺少參數 | 提示重傳 |
+| `4410` | 402 | Tripo 積分不足 | **跳轉儲值頁面** |
+| `4415` | 415 | 檔案格式不支援 | 提示換 JPG/PNG |
+| `4422` | 422 | 姿勢/肢體問題 | 提示換照片 |
+| `4429` | 429 | 速率限制 | 自動重試 |
+| `4500` | 500 | 服務崩潰 | 提示稍後再試 |
+
+### 為什麼是 6 段不是 4 段？
+
+最初我只有 4 段（`4200/4400/4422/4500`）。後來發現問題：
+- **Tripo 積分用完**也回 `4500` → 前端會叫使用者「稍後再試」，**但他再試 100 次也沒用**，因為積分要儲值才會回來
+- **Tripo 速率限制**也回 `4500` → 應該過幾秒自動重試，而不是叫使用者重操作
+
+所以拆出 `4410` 和 `4429`。
+
+**設計邏輯**：
+> **「能讓前端用不同 UI 反應的錯誤，才值得單獨一個碼。」**
+> 比如 `4400`「缺參數」和 `4415`「格式錯」前端都顯示重傳——但格式錯能精確告訴使用者「請改 PNG」，所以分開。
+
+---
+
+## Tripo 上游錯誤映射
+
+這是整個錯誤設計**最有挑戰**的部分——Tripo 自己有一套錯誤碼，怎麼映射到我的業務碼？
+
+### Tripo 原始錯誤
+| HTTP | Tripo code | 含義 |
+|---|---|---|
+| 429 | 2000 | 速率限制 |
+| 400 | 2002 | 任務類型不支援 |
+| 400 | 2003 | 檔案為空 |
+| 400 | 2004 | 不支援的檔案格式 |
+| 400 | 2008 | 內容政策違規 |
+| 403 | 2010 | 積分不足 |
+| 400 | 2015 | 模型版本已棄用 |
+| 400 | 2018 | 模型過於複雜無法重網格 |
+
+### 我設計的映射規則
+[ai_app/services/processing.py](../ai_app/services/processing.py) 的 `_map_tripo_error()`：
+
+```python
+@staticmethod
+def _map_tripo_error(http_status, response_text, stage="tripo"):
+    body = json.loads(response_text) if response_text else {}
+    tripo_code = body.get("code")
+    ...
+    if http_status == 429 or tripo_code == 2000:
+        return "4429", "[stage] Tripo rate limit..."
+    if http_status == 403 or tripo_code == 2010:
+        return "4410", "[stage] Tripo credits insufficient..."
+    if tripo_code in (2003, 2004):
+        return "4415", "[stage] Unsupported file..."
+    if tripo_code in (2008, 2018):
+        return "4422", "[stage] Reconstruction rejected..."
+    return "4500", "[stage] Tripo HTTP ..."
+```
+
+### 映射哲學（這是面試要講的）
+
+1. **「使用者能解決的」單獨一碼** — 4410 儲值、4422 換照片、4415 換格式
+2. **「使用者解決不了的」合併** — 2002 / 2015 都是後端設定錯，使用者看到一樣，都歸 4500
+3. **stage 標記** — `[upload]` / `[create_task]` / `[poll]` / `[download]` 等，讓 log 一秒定位
+
+---
+
+## Log 設計
+
+```python
+logger.error(f"❌ [G4] 失敗 message={code} http={http_status} detail={detail}")
+```
+
+**設計原則**：
+- 業務碼 `message=4xxx` 一定在 log 裡 → 可以 grep
+- 模組標記 `[G4]` → 可以分流到不同 alerting
+- 不打太多細節（耗時、size、token）→ 避免 log 爆量
+
+---
+
+## 我學到的工程觀念
+
+1. **錯誤碼是 API 的合約**，跟正確回應一樣重要
+2. **「使用者能做什麼」決定要不要分碼**，不是「失敗原因不同」就要分
+3. **error_detail 給工程師、message 給前端、HTTP code 給 client 端基礎建設** —— 三層服務不同對象
+4. **永遠不要直接吐 exception message**——資安漏洞 + UX 災難
+
+---
+
+## 推甄面試 1 分鐘錯誤設計講法
+
+> 「我設計了一個 3 層錯誤架構：HTTP status 給 proxy/CDN 看、業務碼給前端決定 UI 行為、debug_info 給工程師除錯。
+>
+> 業務碼用 4 位數，前兩位是模組編號（4xxx 表示 3D 模組），這樣 log 裡看到 `4422` 一眼就知道是 3D 模組的 422 錯誤。
+>
+> 我特別有感的是 `4410` 跟 `4429` 的拆分。最初我把它們都歸 `4500`，但發現 4410 是『積分不足』——使用者再試 100 次也沒用，要儲值；4429 是『速率限制』——應該自動重試。**前端 UI 反應完全不同的錯誤，才值得單獨一個碼**。
+>
+> 還有 Tripo 上游錯誤映射——Tripo 自己有 8 種錯誤，我把它們收斂成我的 6 種業務碼，原則是『使用者能解決的單獨一碼、解決不了的合併』。」
