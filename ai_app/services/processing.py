@@ -516,6 +516,34 @@ class AIProcessor(ImageProcessingInterface):
             "poll_interval": int(os.getenv("TRIPO_POLL_INTERVAL", "5")),
         }
 
+    @staticmethod
+    def _map_tripo_error(http_status, response_text, stage="tripo"):
+        """將 Tripo 上游錯誤映射為內部 4xxx 業務碼。
+        對照表：
+          HTTP 429 / code=2000 → 4429 速率限制
+          HTTP 403 / code=2010 → 4410 積分不足
+          code=2003 / 2004     → 4415 檔案空白或格式不支援
+          code=2008 / 2018     → 4422 內容違規或模型過於複雜（無法重建）
+          其他                  → 4500 服務崩潰或上游異常
+        """
+        try:
+            body = json.loads(response_text) if response_text else {}
+        except Exception:
+            body = {}
+        tripo_code = body.get("code")
+        tripo_msg = body.get("message") or body.get("error") or ""
+        snippet = (response_text or "")[:200]
+
+        if http_status == 429 or tripo_code == 2000:
+            return "4429", f"[{stage}] Tripo rate limit (HTTP {http_status}, code={tripo_code}): {tripo_msg or snippet}"
+        if http_status == 403 or tripo_code == 2010:
+            return "4410", f"[{stage}] Tripo credits insufficient (HTTP {http_status}, code={tripo_code}): {tripo_msg or snippet}"
+        if tripo_code in (2003, 2004):
+            return "4415", f"[{stage}] Unsupported or empty input file (code={tripo_code}): {tripo_msg or snippet}"
+        if tripo_code in (2008, 2018):
+            return "4422", f"[{stage}] Reconstruction rejected (code={tripo_code}): {tripo_msg or snippet}"
+        return "4500", f"[{stage}] Tripo HTTP {http_status}, code={tripo_code}: {tripo_msg or snippet}"
+
     def tripo_upload_image(self, pil_image):
         """[3D-Step1] 上傳圖片至 Tripo，回傳 file_token"""
         import requests as _req
@@ -535,7 +563,8 @@ class AIProcessor(ImageProcessingInterface):
                 timeout=cfg["upload_timeout"],
             )
             if r.status_code != 200:
-                return None, "fail", "4500", f"Tripo upload HTTP {r.status_code}: {r.text[:200]}"
+                code, err = self._map_tripo_error(r.status_code, r.text, stage="upload")
+                return None, "fail", code, err
 
             file_token = (r.json().get("data") or {}).get("image_token")
             if not file_token:
@@ -562,14 +591,14 @@ class AIProcessor(ImageProcessingInterface):
         "extra limbs, missing limbs, asymmetric face, melted features, "
         "artistic interpretation, fantasy elements"
     )
-    TRIPO_DEFAULT_TEXTURE_QUALITY = "detailed"
-    TRIPO_DEFAULT_FACE_LIMIT = 100000  # 一次到位 (refine_model 不支援 image_to_model 來源)
-    TRIPO_DEFAULT_PBR = True
-    TRIPO_DEFAULT_MODEL_VERSION = "v2.5-20250123"       # Tripo 官方有效版本字串
-    TRIPO_DEFAULT_TEXTURE_ALIGNMENT = "original_image"  # 貼圖嚴格對齊原圖
-    TRIPO_DEFAULT_GEOMETRY_QUALITY = "detailed"         # 幾何品質 (跟 texture_quality 並列)
+    TRIPO_DEFAULT_TEXTURE_QUALITY = os.getenv("TRIPO_TEXTURE_QUALITY", "detailed")
+    TRIPO_DEFAULT_FACE_LIMIT = int(os.getenv("TRIPO_FACE_LIMIT", "100000"))
+    TRIPO_DEFAULT_PBR = os.getenv("TRIPO_PBR", "true").lower() in ("1", "true", "yes")
+    TRIPO_DEFAULT_MODEL_VERSION = os.getenv("TRIPO_MODEL_VERSION", "v3.1-20260211")
+    TRIPO_DEFAULT_TEXTURE_ALIGNMENT = os.getenv("TRIPO_TEXTURE_ALIGNMENT", "original_image")
+    TRIPO_DEFAULT_GEOMETRY_QUALITY = os.getenv("TRIPO_GEOMETRY_QUALITY", "detailed")
     # Refine 階段預設參數 (image_to_model 結果再精修)
-    TRIPO_REFINE_FACE_LIMIT = 200000
+    TRIPO_REFINE_FACE_LIMIT = int(os.getenv("TRIPO_REFINE_FACE_LIMIT", "200000"))
 
     def tripo_create_task(self, file_token, prompt=None, negative_prompt=None,
                           texture_quality=None, face_limit=None, pbr=None, style=None):
@@ -625,7 +654,8 @@ class AIProcessor(ImageProcessingInterface):
                 timeout=cfg["task_timeout"],
             )
             if r.status_code != 200:
-                return None, "fail", "4500", f"Tripo create task HTTP {r.status_code}: {r.text[:200]}"
+                code, err = self._map_tripo_error(r.status_code, r.text, stage="create_task")
+                return None, "fail", code, err
 
             task_id = (r.json().get("data") or {}).get("task_id")
             if not task_id:
@@ -685,7 +715,8 @@ class AIProcessor(ImageProcessingInterface):
                 timeout=cfg["task_timeout"],
             )
             if r.status_code != 200:
-                return None, "fail", "4500", f"Tripo refine HTTP {r.status_code}: {r.text[:200]}"
+                code, err = self._map_tripo_error(r.status_code, r.text, stage="refine")
+                return None, "fail", code, err
 
             task_id = (r.json().get("data") or {}).get("task_id")
             if not task_id:

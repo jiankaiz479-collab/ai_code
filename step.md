@@ -1,6 +1,6 @@
 # AI Code Frontend Integration Guide 
 
-更新日期: 2026-03-30
+更新日期: 2026-05-10
 
 ## 1. Container 與 Port
 
@@ -127,6 +127,101 @@ Content-Disposition: attachment; filename="try_on_outfit_1234abcd.png"
 
 ---
 
+### 2.3 3D 物理試穿重建 (Tripo image-to-3D)
+- Method: POST
+- Path: /virtual_try_on/fitting/tryon_3d_physics
+- Request Content-Type: multipart/form-data
+- 必填欄位:
+  - model_image (file)
+- 選填欄位:
+  - data (json string，含 model_info / garments，未來物理布料模擬 / 尺寸換算會用到)
+  - prompt (string，自然語言指引 Tripo 生成)
+  - negative_prompt (string，反向引導詞，最多 255 字)
+  - texture_quality (string，"standard" | "detailed"，預設 standard)
+  - face_limit (int，限制輸出面數)
+  - pbr (bool，"1/true/yes" 開啟，預設 true)
+  - style (string，風格名稱)
+  - refine (bool，是否啟用 200k 面精修，預設依 .env TRIPO_ENABLE_REFINE)
+  - refine_face_limit (int，refine 階段的面數)
+- 除錯開關 (.env)：
+  - TRIPO_DEBUG_MOCK=true → 不呼叫 Tripo API，直接回傳 media/tripo/<TRIPO_MOCK_GLB_NAME>（預設 model3d_2ce2ec84.glb），用於前端聯調省積分
+  - 回應格式與真實流程完全一致（前端不需要區分）
+- Response Content-Type:
+  - multipart/mixed; boundary=frame_boundary（JSON + .glb 二進位）
+
+流程步驟:
+1. 驗證 model_image / data JSON
+2. 上傳圖片至 Tripo 取得 file_token
+3. 建立 image_to_model 任務（帶入 prompt 等進階參數）
+4. 輪詢任務狀態直到完成
+5. （選）建立 Refine 任務並輪詢取得精修模型
+6. 下載 .glb 並落地到 media/tripo/
+7. 回傳 multipart（JSON + GLB 二進位）
+
+HTTP 狀態碼:
+- 200: 成功
+- 400: 缺少 model_image / data JSON 解析失敗
+- 402: Tripo 積分不足
+- 415: 上傳檔案空白或格式不支援
+- 422: 重建失敗（姿勢過於極端 / 肢體不全 / 模型過於複雜 / 內容違規）
+- 429: 3D 服務忙碌中（上游速率限制）
+- 500: 3D 解析服務負載過重或崩潰 / Tripo 流程崩潰
+
+業務錯誤碼 (message):
+- 4200: 成功
+- 4400: 缺少輸入參數 / 參數格式錯誤
+- 4410: 積分不足，請儲值
+- 4415: 檔案格式不支援或檔案空白
+- 4422: 重建失敗（姿勢過於極端、肢體不全、模型過於複雜、內容違規）
+- 4429: 服務忙碌或超出速率限制，請稍後再試
+- 4500: 3D 解析服務負載過重或崩潰
+
+成功回應範例（multipart/mixed）:
+--frame_boundary
+Content-Type: application/json
+
+{
+  "code": 200,
+  "message": "4200",
+  "data": {
+    "file_name": "model3d_1a2b3c4d.glb",
+    "file_format": "GLB"
+  }
+}
+
+--frame_boundary
+Content-Type: model/gltf-binary
+Content-Disposition: attachment; filename="model3d_1a2b3c4d.glb"
+
+<binary glb data>
+--frame_boundary--
+
+Tripo 上游錯誤對應重點:
+- 上游 429 / code=2000：超過生成速率限制 → 後端回傳 message=4429（HTTP 429）
+- 上游 400 / code=2002：不支援的任務類型 → 後端回傳 message=4500
+- 上游 400 / code=2003：輸入檔案為空或被防火牆拒絕 → 後端回傳 message=4415（HTTP 415）
+- 上游 400 / code=2004：不支援的檔案格式 → 後端回傳 message=4415（HTTP 415）
+- 上游 400 / code=2008：輸入違反內容政策 → 後端回傳 message=4422（HTTP 422）
+- 上游 403 / code=2010：Tripo 積分不足 → 後端回傳 message=4410（HTTP 402，前端提示儲值）
+- 上游 400 / code=2015：模型版本已棄用 → 後端回傳 message=4500
+- 上游 400 / code=2018：模型過於複雜無法重網格 → 後端回傳 message=4422
+- 任何輪詢逾時 / 下載失敗 / 未捕獲例外：後端回傳 message=4500
+
+錯誤回應格式（任何失敗情境一律回 application/json）:
+{
+  "code": 422,                      // HTTP 狀態碼
+  "message": "4422",                // 業務錯誤碼（字串）
+  "debug_info": {
+    "error_detail": "[poll] Reconstruction rejected (code=2018): ..."
+  }
+}
+
+備註：
+- 後端 log 會同步輸出 `❌ [G4] 失敗 message=4xxx http=xxx detail=...`，可在伺服器 log 直接搜尋 message 碼定位問題
+- error_detail 格式為 `[stage] 描述 (code=Tripo原始碼): 訊息`，stage 可為 upload / create_task / refine / poll / download
+
+---
+
 ## 3. 前端欄位規格
 
 ### 3.1 Remove Background Request
@@ -144,6 +239,7 @@ Content-Disposition: attachment; filename="try_on_outfit_1234abcd.png"
 
 - 欄位: data
 - 型別: string（JSON）
+- 備註: Try-On 與 3D 重建共用此結構
 - 建議結構:
 {
   "model_info": {
@@ -189,6 +285,17 @@ Content-Disposition: attachment; filename="try_on_outfit_1234abcd.png"
 - 2500: 服飾分析服務暫時不可用，請稍後再試
 - 2501: 試穿合成失敗，請稍後再試
 - HTTP 500 且無 message: 系統忙碌中，請稍後再試
+
+### 5.3 3D 物理試穿重建
+- 4400: 缺少必要參數，請重新上傳 model_image 或檢查 data JSON
+- 4410: 積分不足，請前往儲值頁面後再試
+- 4415: 圖片格式不支援或檔案損毀，請改用 JPG/PNG
+- 4422: 姿勢過於極端或肢體不全，請改上傳全身、四肢清楚的正面照
+- 4429: 服務忙碌中（已達速率限制），請稍後再試
+- 4500: 3D 服務暫時不可用，請稍後再試
+- HTTP 500 且無 message: 系統忙碌中，請稍後再試
+
+備註：對應 Tripo 上游錯誤的處理請參考 §2.3 的 Tripo 上游錯誤對應重點。
 
 ---
 
