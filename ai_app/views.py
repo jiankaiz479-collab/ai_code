@@ -15,6 +15,7 @@ from django.views.decorators.csrf import csrf_exempt
 import uuid
 # 從自定義的服務層導入 AI 處理核心
 from .services.processing import AIProcessor
+from .services.preprocessors import get_remove_bg_pipeline
 import time  # 👈 就是漏掉這一行！
 
 # ==========================================
@@ -35,31 +36,69 @@ class RemoveBgView(View):
     1. 去背功能 (Remove Background)
     加速邏輯：採用 ThreadPoolExecutor 讓去背與 Gemini 分析並行執行。
     """
+    # 業務碼 → (HTTP 狀態, 預設文案)
+    _REMOVE_BG_CODE_MAP = {
+        "1200": (200, ""),
+        "1400": (400, "Missing clothes_image."),
+        "1415": (415, "Unsupported file format."),
+        "1417": (422, "Image too dark."),
+        "1418": (422, "Image too blurry."),
+        "1422": (422, "Image quality too low."),
+        "1423": (422, "Background not removed (low contrast)."),
+        "1424": (422, "No subject detected."),
+        "1426": (422, "Mask quality too low."),
+        "1500": (500, "Background removal failed."),
+        "1501": (500, "Style analysis failed."),
+    }
+
     def _run_parallel(self, processor, input_pil):
-        """並行執行核心：去背與分析同時啟動"""
+        """並行執行核心：去背與分析同時啟動。
+
+        Returns:
+            dict: 成功時包含 output_img / style / file_name / file_path / timings；
+                  失敗時包含 fail=True / code / detail / diagnosis
+        """
         t_total = time.time()
+        # Strategy Pattern：依 .env 決定用 legacy 或 robust 流程
+        pipeline = get_remove_bg_pipeline(processor)
         with ThreadPoolExecutor(max_workers=2) as executor:
-            # 同時發送去背與分析請求
-            fut_bg = executor.submit(_timed, processor.remove_background, input_pil)
+            fut_bg = executor.submit(_timed, pipeline.process, input_pil)
             fut_style = executor.submit(_timed, processor.analyze_clothing_style, input_pil)
-            
-            # 獲取結果
-            (output_img, ok_bg, code_bg, err_bg), bg_dt = fut_bg.result()
+
+            bg_result, bg_dt = fut_bg.result()
             (style, ok_style, code_style, err_style), style_dt = fut_style.result()
-            
+
         total_dt = time.time() - t_total
-        
-        if not ok_bg:
-            raise RuntimeError(f"1500|{code_bg}|{err_bg}")
+
+        # 去背失敗：保留結構化 diagnosis 回傳給 view
+        if not bg_result.ok:
+            return {
+                "fail": True,
+                "code": bg_result.code,
+                "detail": bg_result.error_detail,
+                "diagnosis": bg_result.diagnosis,
+            }
         if not ok_style:
-            raise RuntimeError(f"1501|1501|{err_style}")
+            return {
+                "fail": True,
+                "code": "1501",
+                "detail": err_style,
+                "diagnosis": {},
+            }
+
+        output_img = bg_result.image
 
         # 處理完成後才進行 IO 存檔
         file_name, file_path = processor.get_unique_filename(prefix="processed", ext="png")
         output_img.save(file_path, "PNG")
 
-        return output_img, style, file_name, file_path, {
-            "bg": bg_dt, "style": style_dt, "total": total_dt
+        return {
+            "fail": False,
+            "output_img": output_img,
+            "style": style,
+            "file_name": file_name,
+            "file_path": file_path,
+            "timings": {"bg": bg_dt, "style": style_dt, "total": total_dt},
         }
 
     def post(self, request, *args, **kwargs):
@@ -78,7 +117,28 @@ class RemoveBgView(View):
             input_pil = Image.open(clothes_image).convert("RGBA")
 
             # 執行並行加速處理
-            output_img, style_analysis, file_name, file_path, timings = self._run_parallel(processor, input_pil)
+            result = self._run_parallel(processor, input_pil)
+
+            # 去背 / 分析失敗 → 結構化錯誤回應（含 diagnosis）
+            if result["fail"]:
+                code = result["code"]
+                http_status, default_detail = self._REMOVE_BG_CODE_MAP.get(code, (500, "Unknown error."))
+                detail = result["detail"] or default_detail
+                logger.warning(f"❌ [G2] 失敗 message={code} http={http_status} detail={detail}")
+                payload = {
+                    "code": http_status,
+                    "message": code,
+                    "debug_info": {"error_detail": detail},
+                }
+                if result["diagnosis"]:
+                    payload["debug_info"]["diagnosis"] = result["diagnosis"]
+                return JsonResponse(payload, status=http_status)
+
+            output_img = result["output_img"]
+            style_analysis = result["style"]
+            file_name = result["file_name"]
+            file_path = result["file_path"]
+            timings = result["timings"]
 
             # 封裝 JSON
             analysis_data = {
@@ -106,7 +166,11 @@ class RemoveBgView(View):
 
         except Exception as e:
             logger.exception(f"💥 處理崩潰: {str(e)}")
-            return JsonResponse({"code": 500, "message": "1500", "debug": str(e)}, status=500)
+            return JsonResponse({
+                "code": 500,
+                "message": "1500",
+                "debug_info": {"error_detail": f"Server crash: {str(e)}"},
+            }, status=500)
 # ==========================================
 # 2. 虛擬試穿 (Virtual Try-On)
 # 此 View 負責接收模特兒與衣服，執行合成任務
