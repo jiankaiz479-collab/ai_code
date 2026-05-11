@@ -28,3 +28,10 @@ venv/
 
 # 讓 Git 忽略大模型
 ai_app/services/3d_engines/checkpoints/
+# Real test samples (照片，不上 git)
+tests/real_samples/*.jpg
+tests/real_samples/*.jpeg
+tests/real_samples/*.png
+tests/real_samples/*.heic
+tests/real_samples/*.heif
+

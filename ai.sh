@@ -27,7 +27,7 @@ if [[ "$(docker images -q ${APP_IMAGE} 2> /dev/null)" == "" ]]; then
     echo "🔍 [1/2] 狀態：未偵測到 Docker 映像。正在建置..."
     docker build -t "${APP_IMAGE}" .
 else
-    echo "✅ [3/4] 狀態：Docker 映像已存在，跳過建置。"
+    echo "✅ [1/2] 狀態：Docker 映像已存在，跳過建置。"
 fi
 
 # ---------------------------------------------------------

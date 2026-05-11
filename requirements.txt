@@ -20,3 +20,8 @@ scipy==1.11.4
 # --- 網路工具 ---
 # 確保 API 請求穩定
 requests==2.31.0
+
+# --- 影像格式支援 ---
+# HEIC/HEIF 支援 (iPhone 預設 "高效率" 格式)
+pillow-heif>=0.16.0
+

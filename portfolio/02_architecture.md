@@ -108,6 +108,73 @@
 
 ---
 
+---
+
+## 架構演進：Strategy Pattern 重構（2026-05-10 決策）
+
+### 觸發點
+專案前期只支援「網路上找來的乾淨產品圖」（白底、置中、低解析度）。準備上線時意識到使用者實際會用**手機現場拍**——EXIF 旋轉、12MP 巨大解析度、廣色域、複雜背景、強陰影、暗光雜訊——舊邏輯完全沒處理這些。
+
+> ⚠️ 假設修正：原本以為「HEIC 格式」是首要問題，但使用者用 iPhone 14 Plus 實拍出來其實是 JPEG（可設定），所以真正的優先序是 **EXIF rotation > 解析度 > 色彩 profile > 格式正規化**。詳見 [06_bugs_and_fixes.md 故事 0](06_bugs_and_fixes.md)。
+
+### 設計選擇
+
+| 選項 | 優點 | 缺點 |
+|---|---|---|
+| A) 直接改 `remove_background()` | 簡單 | 改壞了線上掛掉 |
+| B) 寫第二支 API endpoint | 隔離 | 前端要切換 path |
+| C) **Strategy Pattern + 工廠** | 舊邏輯零改動、env 切換 | 多一層抽象 |
+
+**選擇：C**
+
+**理由**：
+1. 舊邏輯**完全不動**（已驗證可用，不冒險）
+2. 用 `.env` 變數 `REMOVE_BG_VERSION=legacy|robust` 切換實作
+3. 未來 `/fitting/modules` 也要同樣升級，**這層抽象可以共用**（DRY 原則）
+4. 失敗時可快速 rollback：改 env、重啟即可
+
+### 設計細節
+
+```python
+# 抽象介面：定義「做什麼」
+class ImagePreprocessor(ABC):
+    @abstractmethod
+    def preprocess(self, image: Image) -> ProcessResult:
+        ...
+
+# 兩個實作
+class LegacyRemoveBg(ImagePreprocessor):
+    """包裝現有 remove_background()，零改動"""
+
+class RobustRemoveBg(ImagePreprocessor):
+    """新版：HEIC + EXIF + resize + 品質檢查 + rembg(可換模型) + OpenCV rescue"""
+
+# 工廠（讀 env 決定回哪個）
+def get_preprocessor() -> ImagePreprocessor:
+    version = os.getenv("REMOVE_BG_VERSION", "legacy")
+    return RobustRemoveBg() if version == "robust" else LegacyRemoveBg()
+```
+
+### 共通基礎建設（為下一波 /modules 升級鋪路）
+
+`services/utils/image_io.py` 收 HEIC / EXIF / resize 共通工具，**`/fitting/modules` 升級時直接 import 用**。
+
+### 學到的設計觀念
+
+1. **可演進性 > 簡潔性**：多一層抽象換到「敢動」的勇氣是值得的
+2. **舊功能是資產**：能跑的舊邏輯**比新邏輯有價值**（已驗證 > 未驗證）
+3. **env 變數是「便宜的 feature flag」**：不需要動到 LaunchDarkly 那種重量級工具
+
+### 推甄面試 30 秒講法（Strategy Pattern 故事版）
+
+> 「上線前我發現一個現實問題：之前測試都用網路上抓的乾淨圖，但使用者實際會用手機拍——HEIC 格式、EXIF 旋轉、複雜背景，舊邏輯完全沒處理。
+>
+> 我選擇用 **Strategy Pattern** 重構，而不是直接改舊 code。我定義一個 `ImagePreprocessor` 抽象介面，舊邏輯包成 `LegacyRemoveBg`、新邏輯寫成 `RobustRemoveBg`，用 `.env` 變數切換。
+>
+> 這樣做有三個好處：第一，舊邏輯零改動，已驗證的功能不冒風險；第二，新邏輯出 bug 改一個 env 就能 rollback；第三，下一個要升級的 `/fitting/modules` 端點可以**直接共用同一套抽象**，不重複造輪子。」
+
+---
+
 ## 推甄面試 30 秒架構講法
 
 > 「我把後端切成 4 層：URL 路由、View 入口、AI Services、抽象介面。
