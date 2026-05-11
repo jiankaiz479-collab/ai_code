@@ -46,7 +46,7 @@ docker rm "${CONTAINER_NAME}" >/dev/null 2>&1 || true
 
 docker run -d \
   --name "${CONTAINER_NAME}" \
-  --network my_network \
+  --network app-network \
   -p "${RUN_PORT}:8002" \
   --env-file .env \
   -v "$(pwd)/ai_app:/app/ai_app" \
