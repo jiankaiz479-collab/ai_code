@@ -46,11 +46,11 @@ class AIProcessor(ImageProcessingInterface):
 
         # 💡 進階初始化：嘗試加載針對人像分割優化的模型 (u2net_human_seg)
         try:
-            self.rembg_session = new_session(model_name='u2net_human_seg') 
+            self.rembg_session = new_session(model_name='u2net_human_seg')
             logger.info("✅ 已初始化針對人像 SEG 優化的 rembg session")
         except Exception as e:
             logger.warning(f"⚠️ rembg session 初始化失敗，使用預設模型: {e}")
-            self.rembg_session = new_session() 
+            self.rembg_session = new_session()
 
     def get_unique_filename(self, prefix="img", ext="png"):
         """
@@ -77,7 +77,7 @@ class AIProcessor(ImageProcessingInterface):
             # 2. 執行去背運算
             # 這裡使用的是 __init__ 裡面的 self.rembg_session
             output_img = remove(input_img, session=self.rembg_session)
-            
+
             # 3. 自動裁剪透明邊框 (為了後續 1501 顏色提取更準)
             bbox = output_img.getbbox()
             if bbox:

@@ -40,12 +40,7 @@ class RemoveBgView(View):
         "1200": (200, ""),
         "1400": (400, "Missing clothes_image."),
         "1415": (415, "Unsupported file format."),
-        "1417": (422, "Image too dark."),
-        "1418": (422, "Image too blurry."),
-        "1422": (422, "Image quality too low."),
-        "1423": (422, "Background not removed (low contrast)."),
-        "1424": (422, "No subject detected."),
-        "1426": (422, "Mask quality too low."),
+        "1422": (422, "Low image quality."),
         "1500": (500, "Background removal failed."),
         "1501": (500, "Style analysis failed."),
     }
@@ -85,9 +80,12 @@ class RemoveBgView(View):
         http_status, default_detail = self._CODE_MAP.get(code, (500, "Unknown error."))
         detail = detail or default_detail
         logger.warning(f"❌ [G2] 失敗 message={code} http={http_status} detail={detail}")
-        payload = {"code": http_status, "message": code, "debug_info": {"error_detail": detail}}
-        if diagnosis:
-            payload["debug_info"]["diagnosis"] = diagnosis
+        suggest = (diagnosis or {}).get("suggestion") or detail
+        payload = {
+            "code": http_status,
+            "message": int(code),
+            "debug_info": {"suggest": suggest},
+        }
         return JsonResponse(payload, status=http_status)
 
     def _success_response(self, result, start_time):
