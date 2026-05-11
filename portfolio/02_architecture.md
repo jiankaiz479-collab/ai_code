@@ -175,6 +175,84 @@ def get_preprocessor() -> ImagePreprocessor:
 
 ---
 
+## 架構演進：Fat Views → Service Layer 重構（2026-05-11）
+
+### 觸發點
+原本 view 同時負責 HTTP I/O **和**業務邏輯——例如 `TryCombineView.post()` 一個方法 200+ 行，混雜 multipart 解析、衣物分析、Gemini 合成、存檔、風格分析。
+
+要做「2D 試穿 + 3D 重建 一條龍」新功能時，**唯一選擇是複製貼上**——這是工程上的 code smell。學長提醒「**該用 Service 層**」。
+
+### 設計選擇
+
+| 選項 | 優點 | 缺點 |
+|---|---|---|
+| A) 直接複製 2D + 3D 到新 view | 最快 | code 重複、改 bug 要改多處 |
+| B) 把共用邏輯抽 helper 函式 | 中等 | 函式介面難設計、仍綁 view |
+| **C) Service Layer** | 業務邏輯獨立、可重用 | 多一層架構 |
+
+**選擇：C**
+
+**理由**：
+1. **業務邏輯不應綁 HTTP**：service 純 Python 物件進出，可被 view / Celery / CLI / 測試共用
+2. **單一職責原則**：view 只做 HTTP，service 只做業務，AIProcessor 只做底層工具
+3. **未來擴展容易**：要做更多組合 endpoint 時，只是「呼叫更多 service」
+
+### 重構結果
+
+新增 4 個 service 檔案：
+
+| Service | 行數 | 職責 |
+|---|---|---|
+| `RemoveBgService` | 101 | 去背 + 風格分析（並行） |
+| `TryOnService` | 141 | 2D 試穿（衣物分析 → 合成 → 風格分析） |
+| `Reconstruct3DService` | 188 | 3D 重建（Tripo 全流程 + Mock） |
+| `TryOn3DService` | 96 | **2D + 3D 一條龍**（純組合，零複製代碼） |
+
+`views.py` 從 **705 行 → 393 行**（縮減 44%）。每個 view 變得只有 4 件事：
+
+```python
+def post(self, request):
+    # ① 解析 multipart
+    # ② 驗證
+    # ③ result = SomeService().method(...)
+    # ④ 成功 → multipart 回應；失敗 → JSON 錯誤
+```
+
+### Service Layer 的回報（同日完成「一條龍」endpoint）
+
+`TryOn3DService.execute()` 核心邏輯**只有 6 行**：
+
+```python
+tryon = self.try_on.synthesize(model_image, garment_images, data)
+if not tryon.ok:
+    return TryOn3DResult(ok=False, code=tryon.code, ...)
+recon = self.recon.reconstruct(tryon.image, options)
+if not recon.ok:
+    return TryOn3DResult(ok=False, code=recon.code, ...)
+return TryOn3DResult(ok=True, glb_bytes=recon.glb_bytes, ...)
+```
+
+**零複製代碼**——純組合既有兩個 service。如果沒先做 Service Layer 重構，這個 endpoint 至少要寫 200+ 行（複製 2D 的全部 + 複製 3D 的全部）。
+
+### 學到的設計觀念
+
+1. **「Composition over duplication」**：新功能 = 既有 service 的組合，不要複製貼上
+2. **業務邏輯不該依賴 framework**：service 不認識 `request` / `response`，所以 Django 換成 FastAPI 也不用重寫
+3. **重構的「回報」要等到下一次擴展才看得到**：當下重構 view 看起來只是搬位置；下一次寫新 endpoint 時才感受到「省了多少時間」
+4. **學長提醒的價值**：很多工程模式（Service Layer / Strategy / Composition）資深工程師會自然提出，趁早問
+
+### 推甄面試 1 分鐘 Service Layer 講法
+
+> 「我接手專案時 view 跟業務邏輯混在一起，一個 endpoint 200+ 行。學長提醒我用 Service Layer 模式——view 只做 HTTP I/O、service 做業務邏輯、底層工具做 AI API 呼叫。
+>
+> 我重構了 4 個 service：去背、2D 試穿、3D 重建，還有一個『2D + 3D 一條龍』。**重構後 views.py 從 705 行縮到 393 行。**
+>
+> 真正的回報在重構完當天就出現——產品需求要做『先 2D 試穿再做 3D』的新 endpoint，**我的 service 核心邏輯只有 6 行**，因為兩個既有 service 已經包好流程，新 view 只是組合它們。如果沒重構，這個新 endpoint 至少要寫 200+ 行複製貼上的 code。
+>
+> 這讓我體會到：**重構的價值不在當下，在下一次擴展時。**」
+
+---
+
 ## 推甄面試 30 秒架構講法
 
 > 「我把後端切成 4 層：URL 路由、View 入口、AI Services、抽象介面。

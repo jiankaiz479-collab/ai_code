@@ -1,22 +1,19 @@
-import os
-import io
 import json
-import tempfile
-import numpy as np  # 如果你有用到 np.array 也要補這行
 import logging
-import requests  # 加上這一行
-from PIL import Image, ImageEnhance
-from django.conf import settings
-from concurrent.futures import ThreadPoolExecutor
+import time
+
+from PIL import Image
 from django.http import JsonResponse, HttpResponse
 from django.views import View
 from django.utils.decorators import method_decorator
 from django.views.decorators.csrf import csrf_exempt
-import uuid
-# 從自定義的服務層導入 AI 處理核心
-from .services.processing import AIProcessor
-from .services.preprocessors import get_remove_bg_pipeline
-import time  # 👈 就是漏掉這一行！
+
+# Service Layer：view 只負責 HTTP I/O，業務邏輯全在 services/
+from .services.processing import AIProcessor  # ReconstructView 仍直接呼叫 (尚未抽 service)
+from .services.remove_bg_service import RemoveBgService
+from .services.try_on_service import TryOnService
+from .services.reconstruct_3d_service import Reconstruct3DService, Reconstruct3DOptions
+from .services.try_on_3d_service import TryOn3DService
 
 # ==========================================
 # 1. 去背功能 (Remove Background)
@@ -27,17 +24,19 @@ import time  # 👈 就是漏掉這一行！
 logger = logging.getLogger(__name__)
 
 
-def _timed(fn, *args, **kwargs):
-    t = time.time()
-    return fn(*args, **kwargs), time.time() - t
 @method_decorator(csrf_exempt, name='dispatch')
 class RemoveBgView(View):
+    """1. 去背功能 (Remove Background)
+
+    View 層只負責：
+      ① 解析 multipart 取出 clothes_image
+      ② 基本驗證（檔案是否存在、是否為圖片）
+      ③ 呼叫 RemoveBgService 跑業務邏輯
+      ④ 把 service 回傳結果包成 HTTP response
+
+    所有「去背 + 風格分析」業務邏輯都在 services/remove_bg_service.py。
     """
-    1. 去背功能 (Remove Background)
-    加速邏輯：採用 ThreadPoolExecutor 讓去背與 Gemini 分析並行執行。
-    """
-    # 業務碼 → (HTTP 狀態, 預設文案)
-    _REMOVE_BG_CODE_MAP = {
+    _CODE_MAP = {
         "1200": (200, ""),
         "1400": (400, "Missing clothes_image."),
         "1415": (415, "Unsupported file format."),
@@ -51,343 +50,154 @@ class RemoveBgView(View):
         "1501": (500, "Style analysis failed."),
     }
 
-    def _run_parallel(self, processor, input_pil):
-        """並行執行核心：去背與分析同時啟動。
-
-        Returns:
-            dict: 成功時包含 output_img / style / file_name / file_path / timings；
-                  失敗時包含 fail=True / code / detail / diagnosis
-        """
-        t_total = time.time()
-        # Strategy Pattern：依 .env 決定用 legacy 或 robust 流程
-        pipeline = get_remove_bg_pipeline(processor)
-        with ThreadPoolExecutor(max_workers=2) as executor:
-            fut_bg = executor.submit(_timed, pipeline.process, input_pil)
-            fut_style = executor.submit(_timed, processor.analyze_clothing_style, input_pil)
-
-            bg_result, bg_dt = fut_bg.result()
-            (style, ok_style, code_style, err_style), style_dt = fut_style.result()
-
-        total_dt = time.time() - t_total
-
-        # 去背失敗：保留結構化 diagnosis 回傳給 view
-        if not bg_result.ok:
-            return {
-                "fail": True,
-                "code": bg_result.code,
-                "detail": bg_result.error_detail,
-                "diagnosis": bg_result.diagnosis,
-            }
-        if not ok_style:
-            return {
-                "fail": True,
-                "code": "1501",
-                "detail": err_style,
-                "diagnosis": {},
-            }
-
-        output_img = bg_result.image
-
-        # 處理完成後才進行 IO 存檔
-        file_name, file_path = processor.get_unique_filename(prefix="processed", ext="png")
-        output_img.save(file_path, "PNG")
-
-        return {
-            "fail": False,
-            "output_img": output_img,
-            "style": style,
-            "file_name": file_name,
-            "file_path": file_path,
-            "timings": {"bg": bg_dt, "style": style_dt, "total": total_dt},
-        }
-
     def post(self, request, *args, **kwargs):
         start_time = time.time()
-        logger.info("--- [G2] 接收到去背請求 (並行加速模式) ---")
+        logger.info("--- [G2] 接收到去背請求 ---")
 
+        # ① 解析輸入
         clothes_image = request.FILES.get('clothes_image')
         if not clothes_image:
             return JsonResponse({"code": 400, "message": "1400"}, status=400)
-        
         if not clothes_image.content_type.startswith('image/'):
             return JsonResponse({"code": 415, "message": "1415"}, status=415)
 
+        # ② 開圖
         try:
-            processor = AIProcessor()
             input_pil = Image.open(clothes_image).convert("RGBA")
-
-            # 執行並行加速處理
-            result = self._run_parallel(processor, input_pil)
-
-            # 去背 / 分析失敗 → 結構化錯誤回應（含 diagnosis）
-            if result["fail"]:
-                code = result["code"]
-                http_status, default_detail = self._REMOVE_BG_CODE_MAP.get(code, (500, "Unknown error."))
-                detail = result["detail"] or default_detail
-                logger.warning(f"❌ [G2] 失敗 message={code} http={http_status} detail={detail}")
-                payload = {
-                    "code": http_status,
-                    "message": code,
-                    "debug_info": {"error_detail": detail},
-                }
-                if result["diagnosis"]:
-                    payload["debug_info"]["diagnosis"] = result["diagnosis"]
-                return JsonResponse(payload, status=http_status)
-
-            output_img = result["output_img"]
-            style_analysis = result["style"]
-            file_name = result["file_name"]
-            file_path = result["file_path"]
-            timings = result["timings"]
-
-            # 封裝 JSON
-            analysis_data = {
-                "code": 200,
-                "message": "1200",
-                "data": {
-                    "file_name": file_name,
-                    "style_analysis": style_analysis,
-                }
-            }
-            json_pretty = json.dumps(analysis_data, indent=4, ensure_ascii=False)
-
-            # 封裝 Multipart 響應
-            boundary = 'bg_removal_boundary'
-            response_body = [
-                f'--{boundary}\r\nContent-Disposition: form-data; name="analysis"\r\nContent-Type: application/json\r\n\r\n{json_pretty}\r\n'.encode('utf-8'),
-                f'--{boundary}\r\nContent-Disposition: form-data; name="processed_image"; filename="{file_name}"\r\nContent-Type: image/png\r\n\r\n'.encode('utf-8')
-            ]
-            with open(file_path, 'rb') as f:
-                response_body.append(f.read())
-            response_body.append(f'\r\n--{boundary}--\r\n'.encode('utf-8'))
-
-            logger.info(f"🎉 去背完成！總耗時: {time.time()-start_time:.2f}s (並行節省了約 {min(timings['bg'], timings['style']):.2f}s)")
-            return HttpResponse(b''.join(response_body), content_type=f'multipart/form-data; boundary={boundary}')
-
         except Exception as e:
-            logger.exception(f"💥 處理崩潰: {str(e)}")
+            logger.exception(f"💥 [G2] 圖片開啟失敗: {e}")
             return JsonResponse({
-                "code": 500,
-                "message": "1500",
-                "debug_info": {"error_detail": f"Server crash: {str(e)}"},
+                "code": 500, "message": "1500",
+                "debug_info": {"error_detail": f"Cannot open image: {e}"},
             }, status=500)
+
+        # ③ 呼叫 Service
+        result = RemoveBgService().process(input_pil)
+
+        # ④ 結果 → HTTP response
+        if not result.ok:
+            return self._fail_response(result.code, result.error_detail, result.diagnosis)
+
+        return self._success_response(result, start_time)
+
+    # ---- helpers ----
+    def _fail_response(self, code, detail, diagnosis):
+        http_status, default_detail = self._CODE_MAP.get(code, (500, "Unknown error."))
+        detail = detail or default_detail
+        logger.warning(f"❌ [G2] 失敗 message={code} http={http_status} detail={detail}")
+        payload = {"code": http_status, "message": code, "debug_info": {"error_detail": detail}}
+        if diagnosis:
+            payload["debug_info"]["diagnosis"] = diagnosis
+        return JsonResponse(payload, status=http_status)
+
+    def _success_response(self, result, start_time):
+        analysis_data = {
+            "code": 200,
+            "message": "1200",
+            "data": {
+                "file_name": result.file_name,
+                "style_analysis": result.style_analysis,
+            }
+        }
+        json_pretty = json.dumps(analysis_data, indent=4, ensure_ascii=False)
+        boundary = 'bg_removal_boundary'
+        body = [
+            f'--{boundary}\r\nContent-Disposition: form-data; name="analysis"\r\nContent-Type: application/json\r\n\r\n{json_pretty}\r\n'.encode('utf-8'),
+            f'--{boundary}\r\nContent-Disposition: form-data; name="processed_image"; filename="{result.file_name}"\r\nContent-Type: image/png\r\n\r\n'.encode('utf-8'),
+        ]
+        with open(result.file_path, 'rb') as f:
+            body.append(f.read())
+        body.append(f'\r\n--{boundary}--\r\n'.encode('utf-8'))
+
+        logger.info(f"🎉 [G2] 去背完成！總耗時: {time.time()-start_time:.2f}s")
+        return HttpResponse(b''.join(body), content_type=f'multipart/form-data; boundary={boundary}')
 # ==========================================
 # 2. 虛擬試穿 (Virtual Try-On)
 # 此 View 負責接收模特兒與衣服，執行合成任務
 # ==========================================
 @method_decorator(csrf_exempt, name='dispatch')
 class TryCombineView(View):
+    """2. 虛擬試穿 (Virtual Try-On)
+
+    View 層只負責 HTTP I/O；業務邏輯在 services/try_on_service.py。
+    """
+    _CODE_MAP = {
+        "2200": (200, ""),
+        "2400": (400, "Missing or invalid input parameters."),
+        "2422": (422, "未偵測到人物，請上傳清楚的人像照"),
+        "2500": (500, "AI 分析服務異常"),
+        "2501": (500, "AI 合成或系統錯誤"),
+    }
+
     def post(self, request, *args, **kwargs):
-        # 紀錄整體流程開始時間
         start_time = time.time()
-        timings = {}
-        logger.info("--- [G3] 開始執行虛擬試穿合成流程 (TryCombineView POST) ---")
+        logger.info("--- [G3] 接收到虛擬試穿請求 ---")
 
-        # ========== 步驟 1: 數據與多檔案接收 ==========
-        step1_start = time.time()
+        # ① 解析 + 驗證輸入
         model_image = request.FILES.get('model_image')
-        garment_images = request.FILES.getlist('garment_images') 
-
+        garment_images = request.FILES.getlist('garment_images')
         try:
-            data_str = request.POST.get('data', '{}')
-            data = json.loads(data_str)
-            garments_info = data.get('garments', [])
-            timings['json_parse'] = time.time() - step1_start
-            logger.info(f"✅ [G3] JSON 解析成功: 收到 {len(garments_info)} 件衣物資訊 (耗時: {timings['json_parse']:.2f}s)")
-        except Exception as e:
-            # 2400: 缺少輸入參數或格式錯誤
-            logger.error(f"❌ [G3] JSON 解析失敗: {str(e)}")
-            return JsonResponse({
-                "code": 400,
-                "message": "2400",
-                "debug_info": {"suggest": "JSON 格式錯誤，請檢查傳入的 data 欄位。"}
-            }, status=400)
+            data = json.loads(request.POST.get('data', '{}'))
+        except json.JSONDecodeError as e:
+            return self._fail("2400", f"JSON 格式錯誤: {e}")
 
-        # ========== 步驟 2: 指標重置與數量驗證 ==========
         if not model_image or not garment_images:
-            logger.warning("❌ [G3] 基礎檢查失敗: 缺少 model_image 或 garment_images")
-            return JsonResponse({
-                "code": 400,
-                "message": "2400",
-                "debug_info": {"suggest": "缺少必要圖片檔案 (model_image 或 garment_images)。"}
-            }, status=400)
-        
+            return self._fail("2400", "缺少必要圖片檔案 (model_image 或 garment_images)")
+
+        garments_info = data.get('garments', [])
         if len(garment_images) != len(garments_info):
-            logger.warning(f"❌ [G3] 數量不匹配: 圖片({len(garment_images)}) vs 資訊({len(garments_info)})")
-            return JsonResponse({
-                "code": 400,
-                "message": "2400",
-                "debug_info": {"suggest": f"圖片數量({len(garment_images)})與資訊數量({len(garments_info)})不匹配。"}
-            }, status=400)
+            return self._fail("2400",
+                              f"圖片數量({len(garment_images)})與資訊數量({len(garments_info)})不匹配")
 
-        try:
-            logger.info("⏳ [G3] 初始化 AIProcessor 並進行圖片指標重置...")
-            step2_start = time.time()
-            processor = AIProcessor()
-            model_image.seek(0)
-            for g in garment_images: 
-                g.seek(0)
-            timings['init'] = time.time() - step2_start
-            logger.info(f"✅ [G3] 指標重置完成，Model 圖片名稱: {model_image.name} (耗時: {timings['init']:.2f}s)")
+        # 重置 file pointer（service 可能不會做）
+        model_image.seek(0)
+        for g in garment_images:
+            g.seek(0)
 
-            # ========== 步驟 3 & 4: 並行處理 (衣物分析 + 圖片轉換) ==========
-            step3_start = time.time()
-            logger.info("⏳ [G3] 啟動並行處理：衣物風格分析 + 模型圖片預處理...")
-            
-            def _analyze_garments():
-                try:
-                    return processor.tool_garment_analysis(garment_images, data)
-                except Exception as e:
-                    logger.exception(f"❌ 衣物分析異常: {str(e)}")
-                    raise
+        # ② 呼叫 Service
+        result = TryOnService().synthesize(model_image, garment_images, data)
 
-            def _prepare_model_image():
-                try:
-                    return Image.open(model_image).convert("RGB")
-                except Exception as e:
-                    logger.exception(f"❌ 圖片轉換異常: {str(e)}")
-                    raise
+        # ③ 結果 → HTTP response
+        if not result.ok:
+            return self._fail(result.code, result.error_detail)
 
-            try:
-                with ThreadPoolExecutor(max_workers=2) as executor:
-                    fut_garment = executor.submit(_analyze_garments)
-                    fut_image = executor.submit(_prepare_model_image)
-                    
-                    # 等待兩個結果
-                    garments_ctx, consult_status = fut_garment.result()
-                    pil_raw = fut_image.result()
-                
-                # 檢查衣物分析結果
-                if consult_status == "fail":
-                    logger.error("❌ [G3] tool_garment_analysis 回傳失敗狀態")
-                    return JsonResponse({
-                        "code": 500,
-                        "message": "2500",
-                        "debug_info": {"suggest": garments_ctx.get('suggest', "AI 分析服務異常")}
-                    }, status=500)
-                
-                timings['parallel_step'] = time.time() - step3_start
-                logger.info(f"✅ [G3] 並行處理完成 (衣物分析 + 圖片轉換)，耗時: {timings['parallel_step']:.2f}s")
-                
-            except Exception as e:
-                logger.exception(f"💥 [G3] 並行處理階段發生未預期錯誤: {str(e)}")
-                return JsonResponse({
-                    "code": 500,
-                    "message": "2500",
-                    "debug_info": {"suggest": f"AI 分析服務異常: {str(e)}"}
-                }, status=500)
+        return self._success_response(result, start_time)
 
-            # ========== 步驟 5: 核心合成 ==========
-            step5_start = time.time()
-            logger.info("🚀 [G3] 開始核心合成流程 (virtual_try_on)...")
-            
-            # 正確拆解 Tuple: (result 字典, status 字串)
-            result, status = processor.virtual_try_on(
-                model_image=pil_raw,
-                garments_ctx=garments_ctx,
-                user_data=data
-            )
-            
-            timings['vto_core'] = time.time() - step5_start
-            logger.info(f"⏳ [G3] 核心合成耗時: {timings['vto_core']:.2f}s")
-            
-            # 處理未偵測到人體 (2422) 或其他合成錯誤 (2501)
-            if status == "fail":
-                error_code = result.get('error_code', 2501)
-                suggest = result.get('suggest', "AI 合成引擎異常")
-                
-                logger.warning(f"⚠️ [G3] 核心合成回傳失敗: 代碼 {error_code}, 建議: {suggest}")
-                
-                return JsonResponse({
-                    "code": 422 if error_code == 2422 else 500,
-                    "message": str(error_code),
-                    "debug_info": {"suggest": suggest}
-                }, status=422 if error_code == 2422 else 500)
+    # ---- helpers ----
+    def _fail(self, code, detail):
+        http_status, default_detail = self._CODE_MAP.get(code, (500, "Unknown error."))
+        detail = detail or default_detail
+        logger.warning(f"❌ [G3] 失敗 message={code} http={http_status} detail={detail}")
+        return JsonResponse({
+            "code": http_status,
+            "message": code,
+            "debug_info": {"error_detail": detail},
+        }, status=http_status)
 
-            # ========== 步驟 6: 存檔 ==========
-            logger.info("⏳ [G3] 合成成功，正在處理最終圖片存檔...")
-            final_image = result.get('result_image') 
-            file_name, file_path = processor.get_unique_filename(prefix="processed", ext="png")
-            final_image.save(file_path, "PNG")
-            logger.info(f"✅ [G3] 存檔完成: {file_name}")
-
-            # ========== 步驟 7: 合成後的風格分析 ==========
-            # 呼叫分析函式，若失敗 code 為 "2504"
-            step7_start = time.time()
-            logger.info("⏳ [G3] 啟動合成後穿搭風格分析 (mode=outfit)...")
-            style_result, outfit_success, outfit_code, outfit_err = processor.analyze_clothing_style(final_image, mode="outfit")
-
-            timings['outfit_analysis'] = time.time() - step7_start
-            logger.info(f"⏳ [G3] 風格分析耗時: {timings['outfit_analysis']:.2f}s")
-
-            # 2. 處理 style_name (確保拿到的是整個列表)
-            if outfit_success:
-                logger.info(f"✅ [G3] 穿搭分析成功: {style_result.get('style_name')}")
-                # 這裡的 style_result 內容現在只有 {"style_name": [...]}
-                main_style = style_result.get("style_name", ["Casual"])
-            else:
-                # 如果分析失敗 (2504)，給一個標示失敗的列表，並記錄 Error
-                logger.error(f"❌ [G3] 穿搭分析失敗: 代碼 {outfit_code}, 原因: {outfit_err}")
-                main_style = ["Unknown"]
-
-            # 3. 放入 JSON 回傳結構
-            analysis_data = {
-                "code": 200,
-                "message": "2200", 
-                "data": {
-                    "file_name": file_name,
-                    "style_name": main_style,
-                    "file_format": "PNG"
-                }
+    def _success_response(self, result, start_time):
+        analysis_data = {
+            "code": 200,
+            "message": "2200",
+            "data": {
+                "file_name": result.file_name,
+                "style_name": result.style_name,
+                "file_format": "PNG",
             }
-            
-            # 如果分析失敗 (outfit_success 為 False)，將 2504 資訊放入 debug_info 供前端參考
-            if not outfit_success:
-                analysis_data["debug_info"] = {
-                    "suggest": f"穿搭風格分析失敗 (錯誤碼: {outfit_code})",
-                    "error_detail": outfit_err
-                }
+        }
+        boundary = 'frame_boundary'
+        body = []
+        body.append(f'--{boundary}\r\nContent-Type: application/json\r\n\r\n'.encode('utf-8'))
+        body.append(json.dumps(analysis_data, indent=2, ensure_ascii=False).encode('utf-8'))
+        body.append(b'\r\n')
+        body.append(f'--{boundary}\r\nContent-Type: image/png\r\n'.encode('utf-8'))
+        body.append(f'Content-Disposition: attachment; filename="{result.file_name}"\r\n\r\n'.encode('utf-8'))
+        with open(result.file_path, 'rb') as f:
+            body.append(f.read())
+        body.append(b'\r\n')
+        body.append(f'--{boundary}--\r\n'.encode('utf-8'))
 
-            # ========== 步驟 8: 構建 Multipart/mixed 響應 ==========
-            logger.info(f"⏳ [G3] 正在封裝最終響應 (Boundary: frame_boundary)...")
-            boundary = 'frame_boundary'
-            response_body = []
-            
-            # JSON 部分
-            response_body.append(f'--{boundary}\r\nContent-Type: application/json\r\n\r\n'.encode('utf-8'))
-            response_body.append(json.dumps(analysis_data, indent=2, ensure_ascii=False).encode('utf-8'))
-            response_body.append(b'\r\n')
-            
-            # 圖片部分
-            response_body.append(f'--{boundary}\r\nContent-Type: image/png\r\n'.encode('utf-8'))
-            response_body.append(f'Content-Disposition: attachment; filename="{file_name}"\r\n\r\n'.encode('utf-8'))
-            
-            with open(file_path, 'rb') as f: 
-                response_body.append(f.read())
-            
-            response_body.append(b'\r\n')
-            response_body.append(f'--{boundary}--\r\n'.encode('utf-8'))
-            
-            # 計算整體流程時間
-            duration = round(time.time() - start_time, 2)
-            timings['total'] = duration
-            
-            # 詳細時間分解日誌
-            timing_details = " | ".join([f"{k}: {v:.2f}s" for k, v in timings.items()])
-            logger.info(f"🎉 [G3] 虛擬試穿流程圓滿結束！")
-            logger.info(f"   ⏱️ 時間分解: {timing_details}")
-            logger.info(f"   📊 總耗時: {duration}s")
-            
-            return HttpResponse(b''.join(response_body), content_type=f'multipart/mixed; boundary={boundary}')
-
-        except Exception as e:
-            # 通用型系統錯誤 (對應 2501)，記錄完整 Traceback
-            logger.exception(f"💥 [G3] 流程發生非預期崩潰 (2501): {str(e)}")
-            return JsonResponse({
-                "code": 500,
-                "message": "2501",
-                "debug_info": {"suggest": f"系統發生非預期錯誤: {str(e)}"}
-            }, status=500)
+        logger.info(f"🎉 [G3] 虛擬試穿完成！總耗時: {time.time()-start_time:.2f}s")
+        return HttpResponse(b''.join(body), content_type=f'multipart/mixed; boundary={boundary}')
         
 
 
@@ -482,217 +292,208 @@ class ReconstructView(View):
 # ==========================================
 @method_decorator(csrf_exempt, name='dispatch')
 class Reconstruct_3D(View):
+    """4. 3D 物理試穿 (Tripo image-to-3D)
+
+    View 層只負責 HTTP I/O；業務邏輯在 services/reconstruct_3d_service.py。
+    """
+    _CODE_MAP = {
+        "4200": (200, ""),
+        "4400": (400, "Missing or invalid input parameters."),
+        "4410": (402, "Insufficient credits. Please top up and try again."),
+        "4415": (415, "Unsupported file format. Please upload a valid JPG/PNG image."),
+        "4422": (422, "Please ensure your full body and all limbs are visible in the photo."),
+        "4429": (429, "3D service is busy (rate limited). Please try again later."),
+        "4500": (500, "3D reconstruction service is overloaded or crashed."),
+    }
+
     def post(self, request, *args, **kwargs):
         start_time = time.time()
-        logger.info("--- [G4] 接收到 3D 重建請求 (Tripo) ---")
+        logger.info("--- [G4] 接收到 3D 重建請求 ---")
 
-        # ========== 步驟 1: 接收圖片與 data JSON (4400) ==========
+        # ① 解析 + 驗證
         model_image = request.FILES.get('model_image')
         if not model_image:
-            logger.warning("❌ [G4] 缺少 model_image (message=4400)")
-            return JsonResponse({
-                "code": 400,
-                "message": "4400",
-                "debug_info": {"error_detail": "Missing model_image file."}
-            }, status=400)
+            return self._fail("4400", "Missing model_image file.")
 
-        # 解析 data JSON (model_info / garments)
-        # 目前僅紀錄、暫不傳給 Tripo；未來物理布料模擬 / 尺寸換算會用到
-        data = {}
-        model_info = {}
-        garments_info = []
+        # data JSON 選填
         data_str = request.POST.get('data', '').strip()
         if data_str:
             try:
-                data = json.loads(data_str)
-                model_info = data.get('model_info', {}) or {}
-                garments_info = data.get('garments', []) or []
-                logger.info("📥 [G4] data JSON 解析成功")
+                json.loads(data_str)  # 純驗證格式，內容暫未使用
             except json.JSONDecodeError as e:
-                logger.warning(f"❌ [G4] data JSON 解析失敗 (message=4400): {e}")
-                return JsonResponse({
-                    "code": 400,
-                    "message": "4400",
-                    "debug_info": {"error_detail": f"Invalid JSON in 'data' field: {str(e)}"}
-                }, status=400)
-        else:
-            logger.info("📥 [G4] 未提供 data，使用預設流程 (僅圖片)")
+                return self._fail("4400", f"Invalid JSON in 'data' field: {e}")
 
-        # 業務碼 → (HTTP 狀態, 預設提示文案)
-        _CODE_MAP = {
-            "4400": (400, "Missing or invalid input parameters."),
-            "4410": (402, "Insufficient credits. Please top up and try again."),
-            "4415": (415, "Unsupported file format. Please upload a valid JPG/PNG image."),
-            "4422": (422, "Please ensure your full body and all limbs are visible in the photo."),
-            "4429": (429, "3D service is busy (rate limited). Please try again later."),
-            "4500": (500, "3D reconstruction service is overloaded or crashed."),
-        }
-
-        def _fail_response(code, err_msg):
-            http_status, default_detail = _CODE_MAP.get(code, (500, "Unknown error."))
-            detail = err_msg or default_detail
-            logger.error(f"❌ [G4] 失敗 message={code} http={http_status} detail={detail}")
-            return JsonResponse({
-                "code": http_status,
-                "message": code,
-                "debug_info": {"error_detail": detail}
-            }, status=http_status)
-
+        # 開圖
         try:
-            processor = AIProcessor()
             model_image.seek(0)
             pil_img = Image.open(model_image).convert("RGBA")
-            logger.info("✅ [G4] 圖片載入成功")
-
-            # ========== Mock 模式: 不呼叫 Tripo，直接讀預設 GLB ==========
-            debug_mock = os.getenv("TRIPO_DEBUG_MOCK", "false").lower() in ("1", "true", "yes")
-            if debug_mock:
-                mock_name = os.getenv("TRIPO_MOCK_GLB_NAME", "model3d_2ce2ec84.glb")
-                mock_path = os.path.join(settings.MEDIA_ROOT, "tripo", mock_name)
-                logger.info("🧪 [G4] Mock 模式啟用，跳過 Tripo API")
-                if not os.path.exists(mock_path):
-                    return _fail_response("4500", f"Mock GLB not found: {mock_path}")
-                with open(mock_path, "rb") as f:
-                    glb_bytes = f.read()
-                file_name = mock_name
-                logger.info("✅ [G4] Mock GLB 載入成功")
-
-                analysis_data = {
-                    "code": 200,
-                    "message": "4200",
-                    "data": {
-                        "file_name": file_name,
-                        "file_format": "GLB",
-                    }
-                }
-                boundary = 'frame_boundary'
-                response_body = []
-                response_body.append(f'--{boundary}\r\nContent-Type: application/json\r\n\r\n'.encode('utf-8'))
-                response_body.append(json.dumps(analysis_data, indent=2, ensure_ascii=False).encode('utf-8'))
-                response_body.append(b'\r\n')
-                response_body.append(f'--{boundary}\r\nContent-Type: model/gltf-binary\r\n'.encode('utf-8'))
-                response_body.append(f'Content-Disposition: attachment; filename="{file_name}"\r\n\r\n'.encode('utf-8'))
-                response_body.append(glb_bytes)
-                response_body.append(b'\r\n')
-                response_body.append(f'--{boundary}--\r\n'.encode('utf-8'))
-
-                logger.info("🎉 [G4] 3D 重建完成 (MOCK)")
-                return HttpResponse(b''.join(response_body), content_type=f'multipart/mixed; boundary={boundary}')
-
-            # ========== Step 1: 上傳圖片至 Tripo ==========
-            logger.info("🚀 [G4] Step1: 上傳圖片至 Tripo...")
-            file_token, st, code, err = processor.tripo_upload_image(pil_img)
-            if st != "success":
-                return _fail_response(code, err)
-            logger.info("✅ [G4] Step1 完成")
-
-            # ========== Step 2: 建立任務 (支援 prompt 等自然語言指令) ==========
-            prompt = (request.POST.get('prompt') or '').strip() or None
-            negative_prompt = (request.POST.get('negative_prompt') or '').strip() or None
-            texture_quality = (request.POST.get('texture_quality') or '').strip() or None
-            face_limit = request.POST.get('face_limit') or None
-            pbr_raw = request.POST.get('pbr')
-            pbr = None if pbr_raw is None else pbr_raw.lower() in ('1', 'true', 'yes')
-            style = (request.POST.get('style') or '').strip() or None
-
-            logger.info("🚀 [G4] Step2: 建立 image_to_model 任務...")
-            task_id, st, code, err = processor.tripo_create_task(
-                file_token,
-                prompt=prompt,
-                negative_prompt=negative_prompt,
-                texture_quality=texture_quality,
-                face_limit=face_limit,
-                pbr=pbr,
-                style=style,
-            )
-            if st != "success":
-                return _fail_response(code, err)
-            logger.info("✅ [G4] Step2 完成")
-
-            # ========== Step 3: 輪詢任務 ==========
-            logger.info("⏳ [G4] Step3: 輪詢任務...")
-            model_url, st, code, err = processor.tripo_poll_task(task_id)
-            if st != "success":
-                return _fail_response(code, err)
-            logger.info("✅ [G4] Step3 完成")
-
-            # ========== Step 3.5: Refine (200k 面精修，可關閉) ==========
-            # 預設開啟；可由 .env TRIPO_ENABLE_REFINE=false 關閉，或 POST refine=false 覆蓋
-            env_refine = os.getenv("TRIPO_ENABLE_REFINE", "true").lower() in ("1", "true", "yes")
-            req_refine = request.POST.get("refine")
-            if req_refine is not None:
-                enable_refine = req_refine.lower() in ("1", "true", "yes")
-            else:
-                enable_refine = env_refine
-
-            refine_face_limit = request.POST.get("refine_face_limit") or None
-
-            if enable_refine:
-                logger.info("🚀 [G4] Step3.5: 建立 Refine 任務...")
-                refine_task_id, st, code, err = processor.tripo_create_refine_task(
-                    draft_task_id=task_id,
-                    face_limit=refine_face_limit,
-                    prompt=prompt,
-                    negative_prompt=negative_prompt,
-                    texture_quality=texture_quality,
-                    pbr=pbr,
-                )
-                if st != "success":
-                    return _fail_response(code, err)
-
-                refined_url, st, code, err = processor.tripo_poll_task(refine_task_id)
-                if st != "success":
-                    return _fail_response(code, err)
-                model_url = refined_url
-                logger.info("✅ [G4] Step3.5 完成")
-            else:
-                logger.info("⏭️ [G4] Step3.5: 已停用 Refine")
-
-            # ========== Step 4: 下載 .glb ==========
-            logger.info("🚀 [G4] Step4: 下載 .glb...")
-            glb_bytes, st, code, err = processor.tripo_download_model(model_url)
-            if st != "success":
-                return _fail_response(code, err)
-            logger.info("✅ [G4] Step4 完成")
-
-            # ========== Step 5: 存檔 (.glb 落地到 media/3d/) ==========
-            glb_dir = os.path.join(settings.MEDIA_ROOT, "tripo")
-            os.makedirs(glb_dir, exist_ok=True)
-            file_name = f"model3d_{uuid.uuid4().hex[:8]}.glb"
-            file_path = os.path.join(glb_dir, file_name)
-            with open(file_path, 'wb') as f:
-                f.write(glb_bytes)
-            logger.info("✅ [G4] Step5 存檔完成")
-
-            # ========== Step 6: 構建 Multipart 響應 ==========
-            analysis_data = {
-                "code": 200,
-                "message": "4200",
-                "data": {
-                    "file_name": file_name,
-                    "file_format": "GLB"
-                }
-            }
-
-            boundary = 'frame_boundary'
-            response_body = []
-            response_body.append(f'--{boundary}\r\nContent-Type: application/json\r\n\r\n'.encode('utf-8'))
-            response_body.append(json.dumps(analysis_data, indent=2, ensure_ascii=False).encode('utf-8'))
-            response_body.append(b'\r\n')
-            response_body.append(f'--{boundary}\r\nContent-Type: model/gltf-binary\r\n'.encode('utf-8'))
-            response_body.append(f'Content-Disposition: attachment; filename="{file_name}"\r\n\r\n'.encode('utf-8'))
-            response_body.append(glb_bytes)
-            response_body.append(b'\r\n')
-            response_body.append(f'--{boundary}--\r\n'.encode('utf-8'))
-
-            logger.info("🎉 [G4] 3D 重建完成")
-            return HttpResponse(b''.join(response_body), content_type=f'multipart/mixed; boundary={boundary}')
-
         except Exception as e:
-            detail = f"Server crash or heavy load: {str(e)}"
-            logger.exception(f"💥 [G4] 3D 流程崩潰 (message=4500): {detail}")
-            return JsonResponse({
-                "code": 500,
-                "message": "4500",
-                "debug_info": {"error_detail": detail}
-            }, status=500)
+            return self._fail("4500", f"Cannot open model_image: {e}")
+
+        # 解析 3D 選項
+        options = self._parse_options(request)
+
+        # ② 呼叫 Service
+        result = Reconstruct3DService().reconstruct(pil_img, options)
+
+        # ③ 結果 → HTTP response
+        if not result.ok:
+            return self._fail(result.code, result.error_detail)
+
+        if result.is_mock:
+            logger.info("🎉 [G4] 3D 重建完成 (MOCK)")
+        else:
+            logger.info(f"🎉 [G4] 3D 重建完成！總耗時: {time.time()-start_time:.2f}s")
+        return self._success_response(result)
+
+    # ---- helpers ----
+    @staticmethod
+    def _parse_options(request) -> Reconstruct3DOptions:
+        pbr_raw = request.POST.get('pbr')
+        req_refine = request.POST.get('refine')
+        return Reconstruct3DOptions(
+            prompt=(request.POST.get('prompt') or '').strip() or None,
+            negative_prompt=(request.POST.get('negative_prompt') or '').strip() or None,
+            texture_quality=(request.POST.get('texture_quality') or '').strip() or None,
+            face_limit=int(request.POST.get('face_limit')) if request.POST.get('face_limit') else None,
+            pbr=None if pbr_raw is None else pbr_raw.lower() in ('1', 'true', 'yes'),
+            style=(request.POST.get('style') or '').strip() or None,
+            enable_refine=None if req_refine is None else req_refine.lower() in ('1', 'true', 'yes'),
+            refine_face_limit=int(request.POST.get('refine_face_limit'))
+                              if request.POST.get('refine_face_limit') else None,
+        )
+
+    def _fail(self, code, detail):
+        http_status, default_detail = self._CODE_MAP.get(code, (500, "Unknown error."))
+        detail = detail or default_detail
+        logger.error(f"❌ [G4] 失敗 message={code} http={http_status} detail={detail}")
+        return JsonResponse({
+            "code": http_status,
+            "message": code,
+            "debug_info": {"error_detail": detail},
+        }, status=http_status)
+
+    def _success_response(self, result):
+        analysis_data = {
+            "code": 200,
+            "message": "4200",
+            "data": {
+                "file_name": result.file_name,
+                "file_format": "GLB",
+            }
+        }
+        boundary = 'frame_boundary'
+        body = []
+        body.append(f'--{boundary}\r\nContent-Type: application/json\r\n\r\n'.encode('utf-8'))
+        body.append(json.dumps(analysis_data, indent=2, ensure_ascii=False).encode('utf-8'))
+        body.append(b'\r\n')
+        body.append(f'--{boundary}\r\nContent-Type: model/gltf-binary\r\n'.encode('utf-8'))
+        body.append(f'Content-Disposition: attachment; filename="{result.file_name}"\r\n\r\n'.encode('utf-8'))
+        body.append(result.glb_bytes)
+        body.append(b'\r\n')
+        body.append(f'--{boundary}--\r\n'.encode('utf-8'))
+        return HttpResponse(b''.join(body), content_type=f'multipart/mixed; boundary={boundary}')
+
+
+# ==========================================
+# 5. 2D 試穿 + 3D 重建 一條龍 (TryOn3D Outfit)
+# 輸入: model_image + garment_images[] + data (同 /fitting/generate)
+# 輸出: multipart/mixed (JSON + .glb) (同 /fitting/tryon_3d_physics)
+# 業務碼: 2xxx (2D 階段失敗) / 4xxx (3D 階段失敗) / 4200 (成功)
+# ==========================================
+@method_decorator(csrf_exempt, name='dispatch')
+class TryOn3DOutfitView(View):
+    """2D 試穿 + 3D 重建 一條龍 endpoint。
+
+    View 層只負責 HTTP I/O；業務邏輯在 services/try_on_3d_service.py
+    （內部組合 TryOnService 與 Reconstruct3DService，零複製代碼）。
+    """
+    _CODE_MAP = {
+        "2200": (200, ""),
+        "2400": (400, "Missing or invalid input parameters."),
+        "2422": (422, "未偵測到人物，請上傳清楚的人像照"),
+        "2500": (500, "AI 分析服務異常"),
+        "2501": (500, "AI 合成或系統錯誤"),
+        "4200": (200, ""),
+        "4400": (400, "Missing or invalid input parameters."),
+        "4410": (402, "Insufficient credits. Please top up and try again."),
+        "4415": (415, "Unsupported file format. Please upload a valid JPG/PNG image."),
+        "4422": (422, "Please ensure your full body and all limbs are visible in the photo."),
+        "4429": (429, "3D service is busy (rate limited). Please try again later."),
+        "4500": (500, "3D reconstruction service is overloaded or crashed."),
+    }
+
+    def post(self, request, *args, **kwargs):
+        start_time = time.time()
+        logger.info("--- [G5] 接收到 2D+3D 一條龍請求 ---")
+
+        # ① 解析 + 驗證輸入（同 TryCombineView）
+        model_image = request.FILES.get('model_image')
+        garment_images = request.FILES.getlist('garment_images')
+        try:
+            data = json.loads(request.POST.get('data', '{}'))
+        except json.JSONDecodeError as e:
+            return self._fail("2400", f"JSON 格式錯誤: {e}")
+
+        if not model_image or not garment_images:
+            return self._fail("2400", "缺少必要圖片檔案 (model_image 或 garment_images)")
+
+        garments_info = data.get('garments', [])
+        if len(garment_images) != len(garments_info):
+            return self._fail("2400",
+                              f"圖片數量({len(garment_images)})與資訊數量({len(garments_info)})不匹配")
+
+        model_image.seek(0)
+        for g in garment_images:
+            g.seek(0)
+
+        # 解析 3D 選項（沿用 Reconstruct_3D 同名方法）
+        options = Reconstruct_3D._parse_options(request)
+
+        # ② 呼叫一條龍 Service
+        result = TryOn3DService().execute(model_image, garment_images, data, options)
+
+        # ③ 結果 → HTTP response
+        if not result.ok:
+            return self._fail(result.code, result.error_detail)
+
+        if result.is_mock:
+            logger.info(f"🎉 [G5] 一條龍完成 (3D MOCK)！總耗時: {time.time()-start_time:.2f}s "
+                        f"(2d={result.timings.get('2d', 0):.2f}s, 3d={result.timings.get('3d', 0):.2f}s)")
+        else:
+            logger.info(f"🎉 [G5] 一條龍完成！總耗時: {time.time()-start_time:.2f}s "
+                        f"(2d={result.timings.get('2d', 0):.2f}s, 3d={result.timings.get('3d', 0):.2f}s)")
+        return self._success_response(result)
+
+    # ---- helpers ----
+    def _fail(self, code, detail):
+        http_status, default_detail = self._CODE_MAP.get(code, (500, "Unknown error."))
+        detail = detail or default_detail
+        logger.warning(f"❌ [G5] 失敗 message={code} http={http_status} detail={detail}")
+        return JsonResponse({
+            "code": http_status,
+            "message": code,
+            "debug_info": {"error_detail": detail},
+        }, status=http_status)
+
+    def _success_response(self, result):
+        analysis_data = {
+            "code": 200,
+            "message": "4200",
+            "data": {
+                "file_name": result.file_name,
+                "file_format": "GLB",
+                "style_name": result.style_name,  # 從 2D 階段帶上來
+            }
+        }
+        boundary = 'frame_boundary'
+        body = []
+        body.append(f'--{boundary}\r\nContent-Type: application/json\r\n\r\n'.encode('utf-8'))
+        body.append(json.dumps(analysis_data, indent=2, ensure_ascii=False).encode('utf-8'))
+        body.append(b'\r\n')
+        body.append(f'--{boundary}\r\nContent-Type: model/gltf-binary\r\n'.encode('utf-8'))
+        body.append(f'Content-Disposition: attachment; filename="{result.file_name}"\r\n\r\n'.encode('utf-8'))
+        body.append(result.glb_bytes)
+        body.append(b'\r\n')
+        body.append(f'--{boundary}--\r\n'.encode('utf-8'))
+        return HttpResponse(b''.join(body), content_type=f'multipart/mixed; boundary={boundary}')
