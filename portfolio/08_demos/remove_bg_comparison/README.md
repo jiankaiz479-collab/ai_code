@@ -6,8 +6,14 @@
 
 ```
 remove_bg_comparison/
-├── originals/    # iPhone 原檔（input）
-└── results/      # 去背結果 PNG（output）
+├── originals/                # iPhone 原檔（input）
+└── results/
+    ├── legacy/               # 舊版（u2net_human_seg）結果
+    │   └── *_legacy.png
+    ├── v1/                   # Robust v1 結果（isnet + matting + LCC + erode）
+    │   └── *_robust.png
+    └── v2/                   # 未來版本依此類推
+        └── *_robust.png
 ```
 
 ## 命名規範
@@ -16,13 +22,10 @@ remove_bg_comparison/
 保留 iPhone 原檔名（例如 `IMG_3188.JPG`），方便對照 metadata。
 
 ### results
-```
-{原檔名 stem}_{變體}.png
-```
-例如：
-- `IMG_3188_legacy.png`（舊版 rembg + u2net_human_seg 結果）
-- `IMG_3188_robust.png`（升級版 isnet + matting + LCC + erode 結果）
-- `IMG_3188_robust_v2.png`（未來如果有 v2 再加）
+每個版本一個子資料夾，檔名 `{stem}_{變體}.png`：
+- `results/legacy/IMG_3188_legacy.png`
+- `results/v1/IMG_3188_robust.png`
+- `results/v2/IMG_3188_robust.png`（未來）
 
 ## 樣本對應表
 
