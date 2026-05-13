@@ -35,3 +35,15 @@ tests/real_samples/*.png
 tests/real_samples/*.heic
 tests/real_samples/*.heif
 
+
+# Portfolio demo images (太大，不上 git，但 README 與 .md 仍會上)
+portfolio/08_demos/**/*.png
+portfolio/08_demos/**/*.jpg
+portfolio/08_demos/**/*.jpeg
+portfolio/08_demos/**/*.JPG
+portfolio/08_demos/**/*.JPEG
+portfolio/08_demos/**/*.HEIC
+portfolio/08_demos/**/*.heic
+
+# v2 失敗樣本自動歸檔（不上 git）
+tests/fail_samples/

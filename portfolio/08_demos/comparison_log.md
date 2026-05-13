@@ -1,66 +1,108 @@
 # 升級對照紀錄
 
-> 每次升級的 before / after 圖檔對照表。
-> 規則：**檔案不刪、不覆蓋**，舊版要長期保留供推甄面試時 demo。
+> 每次升級的 before / after 圖檔對照表與分析。
+> 規則：**檔案不刪、不覆蓋**，舊版長期保留作為回歸測試集。
+>
+> 圖檔存放位置：`portfolio/08_demos/remove_bg_comparison/`（[README](remove_bg_comparison/README.md)）
+> - `originals/` — 輸入原圖
+> - `results/` — 去背結果，按版本分資料夾：
+>   - `results/legacy/*_legacy.png` — 舊版（u2net_human_seg）
+>   - `results/v1/*_robust.png` — Robust v1
+>   - `results/v2/...` — 未來版本依此類推
+>
+> 本檔保留作為「文字版」對照紀錄（即使圖檔遺失，分析與學習仍可查閱）。
 
 ---
 
-## 對照組 #1 — 暗光複雜場景（地上躺）
+## 對照組 #1 — 黑 T-shirt + 灰白磁磚（簡單基準）
 
-| 項目 | 舊版（baseline） | Robust v1 |
+| 項目 | 舊版（legacy） | Robust v1 |
 |---|---|---|
-| 檔名 | `modules_0055e839.png` | `processed_5abbb07d.png` |
-| 路徑 | `media/modules_0055e839.png` | `media/processed_5abbb07d.png` |
-| 來源 endpoint | `/fitting/modules`（人像標準化） | `/clothes/remove_bg`（衣服去背 robust 模式） |
-| 檔案大小 | 432 KB | 1.8 MB |
-| 產出時間 | 2026-05-10 22:50 | 2026-05-11 00:00 |
-| 輸入照片 | iPhone 14 Plus 拍，3024×4032，ISO 640，凌晨 12:34 拍攝，水泥地 + 金屬櫃 + 塑膠袋背景，蜷曲側躺姿勢 | 同上（同一張原圖） |
-| rembg 模型 | `u2net_human_seg`（舊版預設） | `isnet-general-use` |
-| 後處理 | 無（只 crop bbox） | alpha matting + 最大連通區域 + erosion 1px |
-| HTTP 回應 | 200（假成功） | 200（仍是假成功 — 預期 1423 但沒撞到閾值） |
+| 原圖 | `originals/IMG_3188.JPG` | 同上 |
+| 結果 | `results/legacy/IMG_3188_legacy.png` | `results/v1/IMG_3188_robust.png` |
+| rembg 模型 | `u2net_human_seg` | `isnet-general-use` |
+| 後處理 | 無 | alpha matting + LCC + erosion 1px |
 
-### 觀察到的問題（兩版**都有**）
+### 結果對比
 
 | 失敗模式 | 舊版表現 | Robust v1 表現 |
 |---|---|---|
-| 背景沒去乾淨 | ⚠️ 部分背景殘留 + 金屬櫃殘影 | ⚠️ 幾乎整張保留，只有邊緣淡化漸層 |
-| 棕色鞋子殘留 | ⚠️ 有 | ✅ 被 LCC 過濾掉了 |
-| 白邊 fringe | ⚠️ 有 | ⚠️ 變成粉紅 / 橘色漸層暈染（alpha matting 軟邊緣 + 周圍牆面顏色） |
-| 蒙版破洞 | ⚠️ 胸口有 | （無，但因為幾乎沒去背所以也沒洞） |
-| 系統能否偵測失敗 | ❌ 回 200 假成功 | ❌ 也回 200 假成功（蒙版面積剛好沒撞到 95% 閾值） |
+| 背景去除 | ⚠️ **邊緣有灰色背景殘留**（人物模型不擅長抓衣服輪廓） | ✅ 完全乾淨 |
+| 邊緣 fringe | ⚠️ 有 | ✅ 無 |
+| 破洞 | （無）| ✅ 無 |
 
-### 真實的失敗原因
+### 學到的事
 
-兩版都失敗，但**失敗方式不同**：
-- **舊版**：rembg 真的做了去背，但邊緣判定不準（保留鞋子、破洞）
-- **Robust v1**：rembg 對這張**極暗 + 複雜背景**的圖判定「整張幾乎都是前景」，所以蒙版面積接近 100%，幾乎沒去任何東西
-
-### 從這個對照學到的事
-
-1. **isnet 對「複雜暗光場景」不見得比 u2net 好** — 它太保守，全部留下來
-2. **我設的 `mask_coverage_max=0.95` 閾值太寬鬆** — 90% 的「假去背」可以通過
-3. **alpha matting 軟邊緣** 在背景顏色強烈時（粉紅塑膠袋 + 金屬反光）會產生奇怪的色彩漸層
-4. **這張圖根本不該做去背** — 應該在更上層用「姿勢預檢查」直接擋下
-
-### 後續修正方向（待 v1.1 或 v2）
-
-- 把 `REMOVE_BG_MASK_COVERAGE_MAX` 從 `0.95` 收緊到 `0.85`
-- 試 `REMOVE_BG_ALPHA_MATTING=false`（硬邊緣，更容易判定）
-- 試 `REMOVE_BG_ERODE_PX=2~3`（更激進的收邊）
-- 試 `REMOVE_BG_REMBG_MODEL=birefnet-general`（SOTA 模型）
-- 長期：對 `/fitting/modules` 加姿勢預檢查（這張的根本問題）
+即使是「簡單基準」（高對比、單色背景），**舊版人物模型仍會把衣服邊緣判錯**。Robust v1 換通用模型 + 後處理立刻解決。
 
 ---
 
-## 推甄面試金句（用這組對照講）
+## 對照組 #2 — 白色帽 T + 棉褲 + 雜物地板（中等難度）
 
-> 「我升級去背流程後拿了一張極端 case 來測——凌晨拍、複雜背景、人物蜷曲側躺。舊版（modules_0055e839）有部分去背但邊緣不乾淨、有鞋子殘留、胸口有破洞；新版（processed_5abbb07d）裝了最大連通區域過濾後鞋子確實被擋掉，但反而暴露了另一個問題：**新模型 isnet 對極端複雜背景過於保守，幾乎整張都判定成前景**，產生詭異的色彩漸層暈染。
->
-> 這個案例給我兩個重要學習：
-> 1. **換更新的 AI 模型不一定更好**，要看 domain 是否匹配
-> 2. **我設的『蒙版面積 95% 才算失敗』太寬鬆**，90% 的假去背能溜過，所以 fail loud 機制要更嚴
->
-> 這就是為什麼我堅持每次升級都保留 before/after 樣本——**沒實測前，很多假設都不準。**」
+| 項目 | 舊版（legacy） | Robust v1 |
+|---|---|---|
+| 原圖 | `originals/IMG_3184.JPG` | 同上 |
+| 結果 | `results/legacy/IMG_3184_legacy.png` | `results/v1/IMG_3184_robust.png` |
+| rembg 模型 | `u2net_human_seg` | `isnet-general-use` |
+
+### 結果對比
+
+| 失敗模式 | 舊版表現 | Robust v1 表現 |
+|---|---|---|
+| 主體保留 | ❌ **白色帽 T 整件被刪掉** | ✅ 完整保留 |
+| 雜物處理 | ⚠️ **只留下鞋子和散落小物**（人腳被誤判為主體）| ✅ 雜物全部被 LCC 過濾掉 |
+| 邊緣 | ⚠️ 邊角有煙霧狀殘影 | ✅ 乾淨 |
+
+### 為什麼舊版會這樣
+
+`u2net_human_seg` 訓練資料是「人 + 衣服」一起出現的場景。當輸入「平鋪的衣服 + 鞋」時，模型把**最像「人腳」的鞋當成主體**，反而把白色衣服當成背景刪掉。
+
+**這是「模型 domain 不匹配」最戲劇化的例子** —— 證明 v1 換 `isnet-general-use` 是必要的。
+
+---
+
+## 對照組 #3 — 白色短褲 + 木桌 + 粉紅衣架（困難）
+
+| 項目 | 舊版（legacy） | Robust v1 |
+|---|---|---|
+| 原圖 | `originals/IMG_3185.JPG` | 同上 |
+| 結果 | `results/legacy/IMG_3185_legacy.png` | `results/v1/IMG_3185_robust.png` |
+| rembg 模型 | `u2net_human_seg` | `isnet-general-use` |
+
+### 結果對比
+
+| 失敗模式 | 舊版表現 | Robust v1 表現 |
+|---|---|---|
+| 背景（木桌）去除 | ✅ 有去掉 | ✅ 有去掉 |
+| 衣架處理 | ⚠️ 衣架還在 | ⚠️ 衣架還在 |
+| 邊緣品質 | ⚠️ 偏粗糙 | ✅ 乾淨 |
+
+### 兩版都解不掉的問題
+
+衣架穿在褲頭，與短褲在像素上**連通** → LCC（最大連通區域）原理上無法分離連通元件，兩版都會把衣架一起保留。
+
+### 改善方向（roadmap v3）
+
+1. **形狀分析**：偵測細長條狀區域（衣架特徵）後遮罩
+2. **SAM 2 + 類別提示**：用 "clothing" 類別讓模型理解語義邊界
+3. **拍照規範**：建議使用者拍照前**先把衣服從衣架取下平鋪**（最低成本）
+4. **後處理用 Gemini 二次裁切**：請 LLM 識別並回傳衣架 bbox 後挖空
+
+---
+
+## 三組測試總結
+
+| 對照組 | 樣本 | 場景 | 舊版 | Robust v1 |
+|---|---|---|---|---|
+| #1 | IMG_3188 | 黑 T + 磁磚 | ⚠️ 邊緣有殘留 | ✅ 完美 |
+| #2 | IMG_3184 | 白帽 T + 雜物 | ❌ **整件衣服被誤刪** | ✅ 完美 |
+| #3 | IMG_3185 | 白短褲 + 衣架 | ⚠️ 邊緣粗糙 + 衣架在 | ⚠️ 衣架在（邊緣乾淨）|
+
+### 結論
+
+- **舊版 + 人物模型**對「衣服去背」根本不適用（#2 直接刪掉衣服只留鞋）
+- **Robust v1 + 通用模型 + 後處理**：常見場景（#1、#2）表現極佳；連通物件（#3）仍有限制
+- **下一步**：連通物件（#3）→ roadmap v3 形狀分析
 
 ---
 
@@ -68,7 +110,9 @@
 
 ```
 對照組 #N — <描述>
-舊版檔名: <prefix>_<hash>.png
-新版檔名: <prefix>_<hash>.png
-（不要刪、不要覆蓋）
+原圖位置:   portfolio/08_demos/remove_bg_comparison/originals/<IMG_X>.JPG
+舊版結果:   portfolio/08_demos/remove_bg_comparison/results/legacy/<IMG_X>_legacy.png
+v1 結果:    portfolio/08_demos/remove_bg_comparison/results/v1/<IMG_X>_robust.png
+v2 結果:    portfolio/08_demos/remove_bg_comparison/results/v2/<IMG_X>_robust.png
+（不要刪、不要覆蓋；圖檔不上 git，僅 md 紀錄會上）
 ```

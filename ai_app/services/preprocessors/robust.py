@@ -98,7 +98,7 @@ class RobustRemoveBg(RemoveBgPipeline):
         if bbox:
             rgba = rgba.crop(bbox)
 
-        logger.info(f"✅ [robust] 去背成功 (post_diag={post_diag})")
+        logger.info(f"✅ [robust] 去背成功 ")
         return RemoveBgResult(image=rgba, ok=True, code="1200")
 
     # ============================================================
@@ -123,7 +123,7 @@ class RobustRemoveBg(RemoveBgPipeline):
         if brightness < self.DEFAULT_BRIGHTNESS_MIN:
             return {
                 "ok": False,
-                "code": "1417",
+                "code": "1422",
                 "detail": f"[quality] Image too dark (brightness={brightness:.1f} < {self.DEFAULT_BRIGHTNESS_MIN})",
                 "diagnosis": {
                     "failure_type": "too_dark",
@@ -137,7 +137,7 @@ class RobustRemoveBg(RemoveBgPipeline):
         if blur_score < self.DEFAULT_BLUR_MIN:
             return {
                 "ok": False,
-                "code": "1418",
+                "code": "1422",
                 "detail": f"[quality] Image too blurry (Laplacian var={blur_score:.1f} < {self.DEFAULT_BLUR_MIN})",
                 "diagnosis": {
                     "failure_type": "too_blurry",
@@ -216,7 +216,7 @@ class RobustRemoveBg(RemoveBgPipeline):
         if coverage < self.DEFAULT_MASK_COVERAGE_MIN:
             return {
                 "ok": False,
-                "code": "1424",
+                "code": "1500",
                 "detail": f"[mask] No subject detected (mask coverage={coverage:.1%} < {self.DEFAULT_MASK_COVERAGE_MIN:.0%})",
                 "diagnosis": {
                     "failure_type": "no_subject",
@@ -228,7 +228,7 @@ class RobustRemoveBg(RemoveBgPipeline):
         if coverage > self.DEFAULT_MASK_COVERAGE_MAX:
             return {
                 "ok": False,
-                "code": "1423",
+                "code": "1500",
                 "detail": f"[mask] Background not removed (mask coverage={coverage:.1%} > {self.DEFAULT_MASK_COVERAGE_MAX:.0%})",
                 "diagnosis": {
                     "failure_type": "background_not_removed",
@@ -244,7 +244,9 @@ class RobustRemoveBg(RemoveBgPipeline):
     # ============================================================
     @staticmethod
     def _fail(code: str, detail: str, diagnosis: Optional[dict] = None) -> RemoveBgResult:
-        logger.warning(f"❌ [robust] {code} {detail}")
+        # 對外只給 6 個簡潔碼；對內 log 多印 subtype 方便 debug 與統計
+        subtype = (diagnosis or {}).get("failure_type", "unspecified")
+        logger.warning(f"❌ [robust] code={code} subtype={subtype} | {detail}")
         return RemoveBgResult(
             image=None, ok=False, code=code,
             error_detail=detail, diagnosis=diagnosis or {},

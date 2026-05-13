@@ -30,6 +30,20 @@ class ImageProcessingInterface(ABC):
         ...
 
 
+@dataclass
+class ValidationResult:
+    """驗證層的標準回傳格式。"""
+    ok: bool
+    code: str = "1200"
+    detail: Optional[str] = None
+    diagnosis: dict = field(default_factory=dict)
+
+class ImageValidator(ABC):
+    """圖像輸入驗證介面（在進入重度 AI 處理前）。"""
+    @abstractmethod
+    def validate(self, img: Image.Image) -> ValidationResult: ...
+
+
 # ============================================================
 # 去背流程策略合約（Strategy Pattern）
 # ============================================================

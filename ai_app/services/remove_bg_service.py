@@ -90,7 +90,7 @@ class RemoveBgService:
         except Exception as e:
             logger.exception(f"💥 RemoveBgService 失敗: {str(e)}")
             result.code = "1500"
-            result.error_detail = f"Server crash: {str(e)}"
+            result.error_detail = f"系統發生非預期錯誤: {str(e)}"
 
         result.timings["total"] = time.time() - t_start
         return result
