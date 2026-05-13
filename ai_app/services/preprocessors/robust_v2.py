@@ -1,21 +1,18 @@
-"""Robust v2 去背流程：在 v1 之上加四件事。
+"""Robust v2 去背流程。
 
 繼承 RobustRemoveBg，只 override / 包裝差異的部分，v1 邏輯完全不動。
 
-v2 新增：
-  ① 過曝檢查（_quality_check override）                                 ✅
-  ② 失敗樣本歸檔（process 包裝,失敗時存原圖到 tests/fail_samples/）       ✅
-  ③ Gemini 預檢「這是不是衣服 + 形狀可辨識」                              ✅
-  ④ 自動修復曝光(過暗 gamma 拉亮 / 過曝 autocontrast 拉伸)                ✅
+v2 重點（依據 roadmap）：
+  ① 獨立的輕量 InputValidation 層（Heuristics + LLM Gate）
+  ② 自動修復曝光(過暗/過曝)
+  ③ 移除暫緩的失敗樣本歸檔
+  ④ 實作「多指標綜合決策」取代單一閾值的 mask_quality_check
 """
 
-import hashlib
 import io
 import json
 import logging
 import os
-from datetime import datetime
-from pathlib import Path
 
 import cv2
 import numpy as np
@@ -23,30 +20,17 @@ from PIL import Image, ImageOps
 
 from ..interfaces import RemoveBgResult
 from .robust import RobustRemoveBg
+from .validators import InputValidator
 
 logger = logging.getLogger(__name__)
 
 
 class RobustV2RemoveBg(RobustRemoveBg):
-    """v2：在 v1 之上補過曝檢查 + 失敗歸檔 + Gemini 預檢。"""
+    """v2：Validation Gate + 多指標決策。"""
 
-    # ---- v2 新增 env ----
-    DEFAULT_OVEREXPOSURE_RATIO_MAX = float(
-        os.getenv("REMOVE_BG_OVEREXPOSURE_RATIO_MAX", "0.60")
-    )  # 亮度 > 240 的像素佔比上限
     DEFAULT_OVEREXPOSURE_THRESHOLD = int(
         os.getenv("REMOVE_BG_OVEREXPOSURE_THRESHOLD", "240")
     )  # 多亮算「過曝像素」
-
-    # 失敗歸檔目錄(可由 env 覆寫)
-    FAIL_SAMPLES_DIR = Path(
-        os.getenv("REMOVE_BG_FAIL_SAMPLES_DIR", "tests/fail_samples")
-    )
-
-    # Gemini 預檢:可關閉(預設啟用),Gemini API 異常時降級為直接放行
-    ENABLE_GEMINI_PRECHECK = (
-        os.getenv("REMOVE_BG_GEMINI_PRECHECK", "true").lower() in ("1", "true", "yes")
-    )
 
     # 自動修復曝光(過暗 / 過曝):先試圖救回,救不回再走原本的失敗流程
     ENABLE_AUTO_FIX_EXPOSURE = (
@@ -69,49 +53,30 @@ class RobustV2RemoveBg(RobustRemoveBg):
     def name(self) -> str:
         return "robust_v2"
 
+    def __init__(self, processor):
+        super().__init__(processor)
+        self.validator = InputValidator(processor)
+
     # ============================================================
-    # Override：v1 的 process 外加四件事
-    #   1. 自動修復曝光(過暗/過曝先試圖救)
-    #   2. CV 品質檢查(走 _quality_check override,含過曝)
-    #   3. Gemini 預檢「這是不是衣服 + 形狀可辨識」
-    #   4. 失敗歸檔
+    # Override：主流程
     # ============================================================
     def process(self, pil_image: Image.Image) -> RemoveBgResult:
-        # 自己做一次 normalize,後面 super().process() 會再做一次(idempotent)
         try:
             pre_img = self._normalize(pil_image)
         except Exception:
-            # normalize 炸了讓 super().process() 那邊處理
-            result = super().process(pil_image)
-            if not result.ok:
-                self._archive_failure(pil_image, result)
-            return result
+            return super().process(pil_image)
 
         # Step 1: 自動修復曝光
         if self.ENABLE_AUTO_FIX_EXPOSURE:
             pre_img = self._try_fix_exposure(pre_img)
 
-        # Step 2: CV 品質檢查(過暗/過糊/過曝),修復後若仍不過則直接 fail
-        quality = self._quality_check(pre_img)
-        if not quality["ok"]:
-            result = self._fail(quality["code"], quality["detail"], quality["diagnosis"])
-            self._archive_failure(pil_image, result)
-            return result
+        # Step 2: Validation Gate (Heuristics + LLM)
+        val_res = self.validator.validate(pre_img)
+        if not val_res.ok:
+            return self._fail(val_res.code, val_res.detail, val_res.diagnosis)
 
-        # Step 3: Gemini 預檢
-        if self.ENABLE_GEMINI_PRECHECK:
-            gemini = self._gemini_is_clothing(pre_img)
-            if not gemini["ok"]:
-                result = self._fail(gemini["code"], gemini["detail"], gemini["diagnosis"])
-                self._archive_failure(pil_image, result)
-                return result
-
-        # Step 4: 走 v1 完整流程(rembg + 後處理 + mask 檢查)
-        # 注意:傳入「已修復」的 pre_img,super 內部會再 normalize 一次(idempotent)
-        result = super().process(pre_img)
-        if not result.ok:
-            self._archive_failure(pil_image, result)
-        return result
+        # Step 3: 走 v1 完整流程
+        return super().process(pre_img)
 
     # ============================================================
     # 自動修復曝光
@@ -175,152 +140,40 @@ class RobustV2RemoveBg(RobustRemoveBg):
         return fixed
 
     # ============================================================
-    # Gemini 預檢
-    # ============================================================
-    def _gemini_is_clothing(self, img: Image.Image) -> dict:
-        """問 Gemini「這張圖是不是衣服」,回傳統一格式。
-
-        失敗時的處理:API 異常 → 放行(避免 Gemini 服務掛掉導致全部去背都失敗)
-        """
-        client = getattr(self.processor, "client", None)
-        consultant_model = getattr(
-            self.processor, "consultant_model", "gemini-2.5-flash"
-        )
-        if client is None:
-            logger.warning("⚠️ [v2] Gemini client 未初始化,跳過預檢")
-            return {"ok": True, "skipped": True}
-
-        prompt = (
-            "Look at the image (with original background, before any background "
-            "removal) and answer TWO questions about the main subject:\n\n"
-            "1. is_clothing: Is the main subject a piece of clothing/apparel?\n"
-            "   - true: shirt, pants, dress, jacket, hoodie, shorts, skirt, etc.\n"
-            "   - false: food, pet, landscape, screenshot, electronic device, "
-            "room interior, person without clear clothing focus.\n\n"
-            "2. shape_recognizable: If is_clothing=true, can you clearly "
-            "recognize the garment's overall shape?\n"
-            "   - true: lying flat / hung naturally / silhouette is clear.\n"
-            "   - false: crumpled into an unrecognizable ball, heavily folded "
-            "so the shape is hidden, or rolled up.\n"
-            "   - null: set to null if is_clothing=false.\n\n"
-            "Respond ONLY in JSON:\n"
-            '{"is_clothing": true|false, "shape_recognizable": true|false|null, '
-            '"fail_reason": "<short, only if either field is false>"}'
-        )
-
-        try:
-            from google.genai import types
-            response = client.models.generate_content(
-                model=consultant_model,
-                contents=[img, prompt],
-                config=types.GenerateContentConfig(
-                    response_mime_type="application/json",
-                    temperature=0.1,
-                ),
-            )
-            data = json.loads(response.text)
-            is_clothing = bool(data.get("is_clothing"))
-            shape_recognizable = data.get("shape_recognizable")  # true/false/None
-            fail_reason = data.get("fail_reason", "")
-            logger.info(
-                f"🤖 [v2] Gemini 預檢: is_clothing={is_clothing} "
-                f"shape_recognizable={shape_recognizable} reason='{fail_reason}'"
-            )
-        except Exception as e:
-            logger.warning(f"⚠️ [v2] Gemini 預檢異常,降級放行: {e}")
-            return {"ok": True, "skipped": True, "error": str(e)}
-
-        if not is_clothing:
-            return {
-                "ok": False,
-                "code": "1500",
-                "detail": f"[gemini] Subject is not clothing: {fail_reason}",
-                "diagnosis": {
-                    "failure_type": "not_clothing",
-                    "gemini_reason": fail_reason,
-                    "suggestion": "AI 偵測這張不是衣服,請上傳衣服照片",
-                },
-            }
-
-        if shape_recognizable is False:
-            return {
-                "ok": False,
-                "code": "1500",
-                "detail": f"[gemini] Garment shape not recognizable: {fail_reason}",
-                "diagnosis": {
-                    "failure_type": "shape_not_recognizable",
-                    "gemini_reason": fail_reason,
-                    "suggestion": "衣服形狀看不清楚(揉皺/捲起),請攤平後重拍",
-                },
-            }
-
-        return {
-            "ok": True,
-            "is_clothing": True,
-            "shape_recognizable": shape_recognizable,
-        }
-
-    def _archive_failure(self, pil_image: Image.Image, result: RemoveBgResult) -> None:
-        """失敗時把原圖寫到 tests/fail_samples/{日期}/{code}_{hash}.jpg。
-
-        失敗歸檔本身不能讓主流程崩潰,任何 I/O 例外都吞掉只 log。
-        """
-        try:
-            today = datetime.now().strftime("%Y-%m-%d")
-            target_dir = self.FAIL_SAMPLES_DIR / today
-            target_dir.mkdir(parents=True, exist_ok=True)
-
-            # 用圖片 bytes 算 hash,避免同一張圖重複存
-            buf = io.BytesIO()
-            pil_image.convert("RGB").save(buf, format="JPEG", quality=85)
-            img_bytes = buf.getvalue()
-            short_hash = hashlib.md5(img_bytes).hexdigest()[:8]
-
-            filename = f"{result.code}_{short_hash}.jpg"
-            target_path = target_dir / filename
-
-            if target_path.exists():
-                logger.info(f"📁 [v2] 失敗樣本已存在(跳過): {target_path}")
-                return
-
-            target_path.write_bytes(img_bytes)
-            logger.info(f"📁 [v2] 失敗樣本已歸檔: {target_path}")
-        except Exception as e:
-            logger.warning(f"⚠️ [v2] 失敗歸檔本身炸了(主流程不受影響): {e}")
-
-    # ============================================================
-    # Override：在 v1 的 quality check 後追加「過曝」檢查
+    # Override：Quality Checks (Validation 層已處理，故這邊覆寫)
     # ============================================================
     def _quality_check(self, img: Image.Image) -> dict:
-        # 先跑 v1 原本的「過暗 / 過糊」檢查
-        v1_result = super()._quality_check(img)
-        if not v1_result["ok"]:
-            return v1_result
+        # 視覺驗證已在 InputValidator 做過，這裡直接 pass
+        return {"ok": True}
 
-        # v2 新增：過曝檢查
-        cv_rgb = np.array(img.convert("RGB"))
-        gray = cv2.cvtColor(cv_rgb, cv2.COLOR_RGB2GRAY)
-        overexposed_ratio = float(
-            (gray > self.DEFAULT_OVEREXPOSURE_THRESHOLD).sum() / gray.size
-        )
-        if overexposed_ratio > self.DEFAULT_OVEREXPOSURE_RATIO_MAX:
+    def _mask_quality_check(self, rgba: Image.Image, post_diag: dict) -> dict:
+        """多指標綜合決策，而非只靠單一閾值。"""
+        arr = np.array(rgba)
+        alpha = arr[:, :, 3]
+        total_px = alpha.size
+        coverage = float((alpha > 0).sum() / total_px)
+
+        # 新增: Bounding Box 比例
+        x, y, w, h = rgba.getbbox() or (0, 0, 0, 0)
+        bbox_area = w * h
+        fill_ratio = (alpha > 0).sum() / bbox_area if bbox_area > 0 else 0
+
+        # 如果面積太小，無論如何都是失敗
+        if coverage < self.DEFAULT_MASK_COVERAGE_MIN:
             return {
                 "ok": False,
-                "code": "1422",
-                "detail": (
-                    f"[quality] Image overexposed "
-                    f"(ratio={overexposed_ratio:.1%} > {self.DEFAULT_OVEREXPOSURE_RATIO_MAX:.0%}, "
-                    f"threshold>{self.DEFAULT_OVEREXPOSURE_THRESHOLD})"
-                ),
-                "diagnosis": {
-                    "failure_type": "overexposed",
-                    "overexposed_ratio": overexposed_ratio,
-                    "suggestion": "光線太強，請避開直射光重拍",
-                },
+                "code": "1423",
+                "detail": f"[mask] No subject detected (coverage={coverage:.1%})",
+                "diagnosis": {"failure_type": "no_subject", "ui_behavior": "未偵測到主體"}
             }
 
-        return {
-            "ok": True,
-            **{k: v for k, v in v1_result.items() if k != "ok"},
-            "overexposed_ratio": overexposed_ratio,
-        }
+        # 綜合判斷: 面積超大 (>90%) 且幾乎填滿 bbox (fill_ratio > 0.95)，通常是背景沒切掉
+        if coverage > 0.90 and fill_ratio > 0.95:
+            return {
+                "ok": False,
+                "code": "1423",
+                "detail": f"[mask] Background not removed (coverage={coverage:.1%}, fill={fill_ratio:.1%})",
+                "diagnosis": {"failure_type": "background_not_removed", "ui_behavior": "背景與主體對比不足"}
+            }
+
+        return {"ok": True, "mask_coverage": coverage, "fill_ratio": fill_ratio, **post_diag}

@@ -38,11 +38,15 @@ class RemoveBgView(View):
     """
     _CODE_MAP = {
         "1200": (200, ""),
-        "1400": (400, "Missing clothes_image."),
-        "1415": (415, "Unsupported file format."),
-        "1422": (422, "Low image quality."),
-        "1500": (500, "Background removal failed."),
-        "1501": (500, "Style analysis failed."),
+        "1400": (400, "缺少衣服圖片，請重新上傳"),
+        "1410": (422, "請在光線明亮/對焦清楚處重拍"),
+        "1415": (415, "僅支援 JPG/PNG/WEBP 格式"),
+        "1420": (422, "請上傳比例正常的圖片"),
+        "1422": (422, "圖片品質過低，請上傳清晰照片"),
+        "1423": (422, "背景與主體對比不足，請重拍"),
+        "1500": (500, "去背失敗，請稍後再試"),
+        "1501": (500, "風格分析失敗，請稍後再試"),
+        "1510": (422, "AI 偵測不到完整衣物，請確認照片內容"),
     }
 
     def post(self, request, *args, **kwargs):
@@ -63,7 +67,7 @@ class RemoveBgView(View):
             logger.exception(f"💥 [G2] 圖片開啟失敗: {e}")
             return JsonResponse({
                 "code": 500, "message": "1500",
-                "debug_info": {"error_detail": f"Cannot open image: {e}"},
+                "debug_info": {"error_detail": f"無法開啟圖片: {e}"},
             }, status=500)
 
         # ③ 呼叫 Service
@@ -77,14 +81,14 @@ class RemoveBgView(View):
 
     # ---- helpers ----
     def _fail_response(self, code, detail, diagnosis):
-        http_status, default_detail = self._CODE_MAP.get(code, (500, "Unknown error."))
+        http_status, default_detail = self._CODE_MAP.get(code, (500, "未知錯誤"))
         detail = detail or default_detail
         logger.warning(f"❌ [G2] 失敗 message={code} http={http_status} detail={detail}")
-        suggest = (diagnosis or {}).get("suggestion") or detail
+        ui_behavior = (diagnosis or {}).get("ui_behavior") or detail
         payload = {
             "code": http_status,
             "message": int(code),
-            "debug_info": {"suggest": suggest},
+            "debug_info": {"ui_behavior": ui_behavior},
         }
         return JsonResponse(payload, status=http_status)
 
@@ -121,10 +125,10 @@ class TryCombineView(View):
     """
     _CODE_MAP = {
         "2200": (200, ""),
-        "2400": (400, "Missing or invalid input parameters."),
+        "2400": (400, "參數不完整或格式錯誤，請檢查輸入"),
         "2422": (422, "未偵測到人物，請上傳清楚的人像照"),
-        "2500": (500, "AI 分析服務異常"),
-        "2501": (500, "AI 合成或系統錯誤"),
+        "2500": (500, "AI 分析服務異常，請稍後再試"),
+        "2501": (500, "AI 合成或系統錯誤，請稍後再試"),
     }
 
     def post(self, request, *args, **kwargs):
@@ -163,7 +167,7 @@ class TryCombineView(View):
 
     # ---- helpers ----
     def _fail(self, code, detail):
-        http_status, default_detail = self._CODE_MAP.get(code, (500, "Unknown error."))
+        http_status, default_detail = self._CODE_MAP.get(code, (500, "未知錯誤"))
         detail = detail or default_detail
         logger.warning(f"❌ [G3] 失敗 message={code} http={http_status} detail={detail}")
         return JsonResponse({
@@ -209,7 +213,7 @@ class ReconstructView(View):
             return JsonResponse({
                 "code": 400,
                 "message": "3400",
-                "debug_info": {"error_detail": "Missing model_image file."}
+                "debug_info": {"error_detail": "缺少模特圖片，請重新上傳"}
             }, status=400)
 
         try:
@@ -237,7 +241,7 @@ class ReconstructView(View):
                     "code": 422,
                     "message": "3422",
                     "debug_info": {
-                        "error_detail": err_msg or "Please ensure your full body and all limbs are visible in the photo."
+                        "error_detail": err_msg or "請改上傳全身、四肢清楚的正面照"
                     }
                 }, status=422)
 
@@ -278,7 +282,7 @@ class ReconstructView(View):
             return JsonResponse({
                 "code": 500,
                 "message": "3500",
-                "debug_info": {"error_detail": f"Server crash or heavy load: {str(e)}"}
+                "debug_info": {"error_detail": f"系統忙碌中，請稍後再試: {str(e)}"}
             }, status=500)
 
 
@@ -296,12 +300,12 @@ class Reconstruct_3D(View):
     """
     _CODE_MAP = {
         "4200": (200, ""),
-        "4400": (400, "Missing or invalid input parameters."),
-        "4410": (402, "Insufficient credits. Please top up and try again."),
-        "4415": (415, "Unsupported file format. Please upload a valid JPG/PNG image."),
-        "4422": (422, "Please ensure your full body and all limbs are visible in the photo."),
-        "4429": (429, "3D service is busy (rate limited). Please try again later."),
-        "4500": (500, "3D reconstruction service is overloaded or crashed."),
+        "4400": (400, "缺少必要參數，請重新上傳"),
+        "4410": (402, "積分不足，請前往儲值頁面"),
+        "4415": (415, "圖片格式不支援，請改用 JPG/PNG"),
+        "4422": (422, "請改上傳全身、四肢清楚的正面照"),
+        "4429": (429, "服務忙碌中，請稍後再試"),
+        "4500": (500, "系統忙碌中，請稍後再試"),
     }
 
     def post(self, request, *args, **kwargs):
@@ -311,7 +315,7 @@ class Reconstruct_3D(View):
         # ① 解析 + 驗證
         model_image = request.FILES.get('model_image')
         if not model_image:
-            return self._fail("4400", "Missing model_image file.")
+            return self._fail("4400", "缺少模特圖片，請重新上傳")
 
         # data JSON 選填
         data_str = request.POST.get('data', '').strip()
@@ -326,7 +330,7 @@ class Reconstruct_3D(View):
             model_image.seek(0)
             pil_img = Image.open(model_image).convert("RGBA")
         except Exception as e:
-            return self._fail("4500", f"Cannot open model_image: {e}")
+            return self._fail("4500", f"無法開啟圖片: {e}")
 
         # 解析 3D 選項
         options = self._parse_options(request)
@@ -362,7 +366,7 @@ class Reconstruct_3D(View):
         )
 
     def _fail(self, code, detail):
-        http_status, default_detail = self._CODE_MAP.get(code, (500, "Unknown error."))
+        http_status, default_detail = self._CODE_MAP.get(code, (500, "未知錯誤"))
         detail = detail or default_detail
         logger.error(f"❌ [G4] 失敗 message={code} http={http_status} detail={detail}")
         return JsonResponse({
@@ -408,17 +412,17 @@ class TryOn3DOutfitView(View):
     """
     _CODE_MAP = {
         "2200": (200, ""),
-        "2400": (400, "Missing or invalid input parameters."),
+        "2400": (400, "參數不完整或格式錯誤，請檢查輸入"),
         "2422": (422, "未偵測到人物，請上傳清楚的人像照"),
-        "2500": (500, "AI 分析服務異常"),
-        "2501": (500, "AI 合成或系統錯誤"),
+        "2500": (500, "AI 分析服務異常，請稍後再試"),
+        "2501": (500, "AI 合成或系統錯誤，請稍後再試"),
         "4200": (200, ""),
-        "4400": (400, "Missing or invalid input parameters."),
-        "4410": (402, "Insufficient credits. Please top up and try again."),
-        "4415": (415, "Unsupported file format. Please upload a valid JPG/PNG image."),
-        "4422": (422, "Please ensure your full body and all limbs are visible in the photo."),
-        "4429": (429, "3D service is busy (rate limited). Please try again later."),
-        "4500": (500, "3D reconstruction service is overloaded or crashed."),
+        "4400": (400, "缺少必要參數，請重新上傳"),
+        "4410": (402, "積分不足，請前往儲值頁面"),
+        "4415": (415, "圖片格式不支援，請改用 JPG/PNG"),
+        "4422": (422, "請改上傳全身、四肢清楚的正面照"),
+        "4429": (429, "服務忙碌中，請稍後再試"),
+        "4500": (500, "系統忙碌中，請稍後再試"),
     }
 
     def post(self, request, *args, **kwargs):
@@ -465,7 +469,7 @@ class TryOn3DOutfitView(View):
 
     # ---- helpers ----
     def _fail(self, code, detail):
-        http_status, default_detail = self._CODE_MAP.get(code, (500, "Unknown error."))
+        http_status, default_detail = self._CODE_MAP.get(code, (500, "未知錯誤"))
         detail = detail or default_detail
         logger.warning(f"❌ [G5] 失敗 message={code} http={http_status} detail={detail}")
         return JsonResponse({
