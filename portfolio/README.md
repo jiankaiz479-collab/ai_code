@@ -27,6 +27,7 @@
 | [06_bugs_and_fixes.md](06_bugs_and_fixes.md) | 卡關故事（待累積） | 🔥 教授最愛問 |
 | [07_metrics.md](07_metrics.md) | 量化成果（速度、成本、成功率） | ✅ 提數字 |
 | [08_demos/](08_demos/) | 截圖、影片、before/after | ✅ 面試 demo |
+| [roadmap.md](roadmap.md) | v1→v4 升級路線圖（36 個問題分版本） | 🔥 「下一步」答案 |
 | [99_self_intro.md](99_self_intro.md) | 自傳/讀書計畫草稿 | ✅ 書面審查 |
 
 ---

@@ -169,7 +169,7 @@ class Reconstruct3DService:
         except Exception as e:
             logger.exception(f"💥 Reconstruct3DService 失敗: {str(e)}")
             result.code = "4500"
-            result.error_detail = f"Server crash or heavy load: {str(e)}"
+            result.error_detail = f"系統忙碌中，請稍後再試: {str(e)}"
 
         result.timings["total"] = time.time() - t_start
         return result

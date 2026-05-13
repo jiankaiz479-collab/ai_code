@@ -46,11 +46,11 @@ class AIProcessor(ImageProcessingInterface):
 
         # 💡 進階初始化：嘗試加載針對人像分割優化的模型 (u2net_human_seg)
         try:
-            self.rembg_session = new_session(model_name='u2net_human_seg') 
+            self.rembg_session = new_session(model_name='u2net_human_seg')
             logger.info("✅ 已初始化針對人像 SEG 優化的 rembg session")
         except Exception as e:
             logger.warning(f"⚠️ rembg session 初始化失敗，使用預設模型: {e}")
-            self.rembg_session = new_session() 
+            self.rembg_session = new_session()
 
     def get_unique_filename(self, prefix="img", ext="png"):
         """
@@ -77,7 +77,7 @@ class AIProcessor(ImageProcessingInterface):
             # 2. 執行去背運算
             # 這裡使用的是 __init__ 裡面的 self.rembg_session
             output_img = remove(input_img, session=self.rembg_session)
-            
+
             # 3. 自動裁剪透明邊框 (為了後續 1501 顏色提取更準)
             bbox = output_img.getbbox()
             if bbox:
@@ -353,7 +353,7 @@ class AIProcessor(ImageProcessingInterface):
                     logger.error(f"❌ Step 3 分析失敗 (item {idx}): {err}")
                     return {
                         "error_code": 2500,
-                        "suggest": "AI Model (Analysis) service is currently unavailable. Please try again later."
+                        "suggest": "AI 模型分析服務暫時無法使用，請稍後再試。"
                     }, "fail"
                 items_by_idx[idx] = item
                 if item["cat"] in ('pants', 'skirt'):
@@ -438,11 +438,11 @@ class AIProcessor(ImageProcessingInterface):
             
             # --- [3. 狀態攔截：2422 偵測不到人體 / 安全過濾] ---
             if not response or not response.candidates:
-                return {"error_code": 2422, "suggest": "Content blocked by safety filters or no human detected."}, "fail"
+                return {"error_code": 2422, "suggest": "內容被安全機制阻擋或未偵測到人物。"}, "fail"
 
             try:
                 if "ERROR: NO_HUMAN_DETECTED" in response.text:
-                    return {"error_code": 2422, "suggest": "The provided model_image is not valid. No human detected."}, "fail"
+                    return {"error_code": 2422, "suggest": "提供的照片無效，未偵測到人物。"}, "fail"
             except:
                 pass
 
@@ -458,7 +458,7 @@ class AIProcessor(ImageProcessingInterface):
                 result_pil = Image.open(io.BytesIO(image_bytes))
 
             except Exception as e:
-                return {"error_code": 2422, "suggest": "Our engine couldn't detect a clear human body structure."}, "fail"
+                return {"error_code": 2422, "suggest": "系統無法偵測到清晰的人體結構。"}, "fail"
 
             # --- [5. 後處理：二次去背與重新置中佈局] ---
             try:
@@ -485,8 +485,8 @@ class AIProcessor(ImageProcessingInterface):
             err_msg = str(e).lower()
             logger.error(f"❌ Step 5 合成嚴重失敗: {e}")
             if any(word in err_msg for word in ["person", "human", "safety", "block"]):
-                return {"error_code": 2422, "suggest": "Please use a clearer photo with a visible person."}, "fail"
-            return {"error_code": 2501, "suggest": f"AI Synthesis service abnormal: {str(e)}"}, "fail"
+                return {"error_code": 2422, "suggest": "未偵測到人物，請上傳清楚的人像照。"}, "fail"
+            return {"error_code": 2501, "suggest": f"AI 合成服務異常: {str(e)}"}, "fail"
     
     
     
@@ -535,14 +535,14 @@ class AIProcessor(ImageProcessingInterface):
         snippet = (response_text or "")[:200]
 
         if http_status == 429 or tripo_code == 2000:
-            return "4429", f"[{stage}] Tripo rate limit (HTTP {http_status}, code={tripo_code}): {tripo_msg or snippet}"
+            return "4429", f"[{stage}] 速率限制 (HTTP {http_status}, code={tripo_code}): {tripo_msg or snippet}"
         if http_status == 403 or tripo_code == 2010:
-            return "4410", f"[{stage}] Tripo credits insufficient (HTTP {http_status}, code={tripo_code}): {tripo_msg or snippet}"
+            return "4410", f"[{stage}] 積分不足 (HTTP {http_status}, code={tripo_code}): {tripo_msg or snippet}"
         if tripo_code in (2003, 2004):
-            return "4415", f"[{stage}] Unsupported or empty input file (code={tripo_code}): {tripo_msg or snippet}"
+            return "4415", f"[{stage}] 檔案不支援或空白 (code={tripo_code}): {tripo_msg or snippet}"
         if tripo_code in (2008, 2018):
-            return "4422", f"[{stage}] Reconstruction rejected (code={tripo_code}): {tripo_msg or snippet}"
-        return "4500", f"[{stage}] Tripo HTTP {http_status}, code={tripo_code}: {tripo_msg or snippet}"
+            return "4422", f"[{stage}] 內容違規或模型過度複雜 (code={tripo_code}): {tripo_msg or snippet}"
+        return "4500", f"[{stage}] Tripo 上游錯誤 HTTP {http_status}, code={tripo_code}: {tripo_msg or snippet}"
 
     def tripo_upload_image(self, pil_image):
         """[3D-Step1] 上傳圖片至 Tripo，回傳 file_token"""
