@@ -3,6 +3,7 @@ import logging
 import time
 
 from PIL import Image
+from django.shortcuts import render
 from django.http import JsonResponse, HttpResponse
 from django.views import View
 from django.utils.decorators import method_decorator
@@ -410,6 +411,17 @@ class Reconstruct_3D(View):
         body.append(b'\r\n')
         body.append(f'--{boundary}--\r\n'.encode('utf-8'))
         return HttpResponse(b''.join(body), content_type=f'multipart/mixed; boundary={boundary}')
+
+
+# ==========================================
+# 6. 歷史紀錄查詢介面 (Frontend View)
+# ==========================================
+class HistoryPageView(View):
+    """
+    回傳歷史紀錄檢視的前端網頁 (目前為 Mock 資料展示)
+    """
+    def get(self, request, *args, **kwargs):
+        return render(request, 'ai_app/history.html')
 
 
 # ==========================================

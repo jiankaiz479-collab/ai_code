@@ -41,6 +41,29 @@ else
 fi
 
 # ---------------------------------------------------------
+# 3.5) 啟動 MinIO 儲存服務
+# ---------------------------------------------------------
+echo "🔍 [1.5/2] 狀態：正在啟動 MinIO 儲存服務..."
+docker network create app-network >/dev/null 2>&1 || true
+
+docker stop ai-minio >/dev/null 2>&1 || true
+docker rm ai-minio >/dev/null 2>&1 || true
+
+docker run -d \
+  --name ai-minio \
+  --network app-network \
+  -p 9002:9000 \
+  -p 10092:9001 \
+  -e MINIO_ROOT_USER=minioadmin \
+  -e MINIO_ROOT_PASSWORD=minioadmin \
+  -v "$(pwd)/minio_data:/data" \
+  minio/minio server /data --console-address ":9001"
+
+echo "⏳ 正在等待 MinIO 啟動並建立 Bucket..."
+sleep 3
+docker run --rm --network app-network --entrypoint sh minio/mc -c "mc alias set myminio http://ai-minio:9000 minioadmin minioadmin && mc mb myminio/history-images --ignore-existing && mc anonymous set public myminio/history-images"
+
+# ---------------------------------------------------------
 # 4) 啟動 Docker 容器
 # ---------------------------------------------------------
 echo "🔍 [1/2] 狀態：正在啟動 2D 影像服務..."
@@ -67,5 +90,7 @@ docker run -d \
 
 echo "======================================================="
 echo "🎉 全系統配置完成！"
+echo "🔗 MinIO S3 API：http://localhost:9002"
+echo "🔗 MinIO Console：http://localhost:10092 (登入: minioadmin / minioadmin)"
 echo "🔗 服務位址：http://localhost:${RUN_PORT}"
 echo "======================================================="

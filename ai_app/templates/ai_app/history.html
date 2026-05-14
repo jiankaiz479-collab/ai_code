@@ -1,0 +1,928 @@
+{% load static %}
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>歷史紀錄檢視</title>
+    <meta name="color-scheme" content="light only">
+    <style>
+        :root {
+            --bg: #f8fbff;
+            --panel: rgba(255, 255, 255, 0.94);
+            --panel-strong: #ffffff;
+            --border: #e4e9f1;
+            --text: #202124;
+            --muted: #5f6368;
+            --blue: #1a73e8;
+            --blue-soft: rgba(26, 115, 232, 0.12);
+            --green: #188038;
+            --red: #d93025;
+            --shadow: 0 12px 30px rgba(60, 64, 67, 0.12);
+            --shadow-soft: 0 4px 18px rgba(60, 64, 67, 0.08);
+            --radius-xl: 24px;
+            --radius-lg: 18px;
+            --radius-md: 14px;
+        }
+
+        * { box-sizing: border-box; }
+        html, body { margin: 0; min-height: 100%; }
+        body {
+            font-family: Inter, "Noto Sans TC", "PingFang TC", "Microsoft JhengHei", sans-serif;
+            color: var(--text);
+            background:
+                linear-gradient(180deg, #f8fbff 0%, #f4f8fd 100%);
+        }
+
+        button { font: inherit; }
+        .hidden { display: none !important; }
+
+        .app-shell {
+            min-height: 100vh;
+            display: grid;
+            grid-template-columns: 80px minmax(0, 1fr);
+        }
+
+        .topbar {
+            position: fixed;
+            inset: 0 0 auto 0;
+            height: 64px;
+            background: rgba(255, 255, 255, 0.82);
+            backdrop-filter: blur(16px);
+            border-bottom: 1px solid rgba(228, 233, 241, 0.8);
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 0 16px 0 20px;
+            z-index: 60;
+        }
+
+        .topbar-left,
+        .topbar-right,
+        .breadcrumb-row,
+        .grid-toolbar,
+        .selected-bar,
+        .hero-row,
+        .stats-row,
+        .card-meta-row,
+        .modal-top,
+        .modal-stats,
+        .modal-meta-row {
+            display: flex;
+            align-items: center;
+        }
+
+        .brand-mini {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            min-width: 210px;
+        }
+
+        .brand-mark {
+            width: 34px;
+            height: 34px;
+            border-radius: 10px;
+            background: linear-gradient(135deg, #4285f4, #34a853, #fbbc05, #ea4335);
+            box-shadow: var(--shadow-soft);
+        }
+
+        .brand-text {
+            font-size: 1rem;
+            font-weight: 700;
+            letter-spacing: 0.01em;
+        }
+
+        .searchbar {
+            width: min(760px, 46vw);
+            height: 44px;
+            border-radius: 24px;
+            background: #eef3fb;
+            border: 1px solid transparent;
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            padding: 0 18px;
+            color: var(--muted);
+        }
+
+        .searchbar span { font-size: 1.05rem; }
+        .searchbar input {
+            width: 100%;
+            border: none;
+            outline: none;
+            background: transparent;
+            font-size: 0.96rem;
+            color: var(--text);
+        }
+
+        .topbar-right { gap: 10px; }
+        .icon-pill, .avatar-pill {
+            width: 40px;
+            height: 40px;
+            border-radius: 50%;
+            border: none;
+            background: transparent;
+            display: grid;
+            place-items: center;
+            color: #444;
+            cursor: pointer;
+        }
+        .icon-pill:hover { background: #eef3fb; }
+        .avatar-pill {
+            background: linear-gradient(135deg, #1a73e8, #0f9d58);
+            color: white;
+            font-weight: 800;
+        }
+
+        .side-rail {
+            position: fixed;
+            top: 64px;
+            left: 0;
+            bottom: 0;
+            width: 80px;
+            background: rgba(255, 255, 255, 0.92);
+            border-right: 1px solid rgba(228, 233, 241, 0.8);
+            padding-top: 14px;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 10px;
+            z-index: 40;
+        }
+
+        .rail-item {
+            width: 48px;
+            height: 48px;
+            border-radius: 16px;
+            border: none;
+            background: transparent;
+            color: #5f6368;
+            display: grid;
+            place-items: center;
+            cursor: pointer;
+            position: relative;
+            transition: 0.2s ease;
+        }
+
+        .rail-item:hover { background: #eef3fb; }
+        .rail-item.active {
+            color: var(--blue);
+            background: var(--blue-soft);
+        }
+
+        .rail-label {
+            font-size: 0.72rem;
+            margin-top: -4px;
+            color: #5f6368;
+        }
+
+        .main {
+            grid-column: 2;
+            padding: 92px 24px 24px 24px;
+            min-width: 0;
+        }
+
+        .content-shell {
+            max-width: 1600px;
+            margin: 0 auto;
+            display: grid;
+            gap: 18px;
+        }
+
+        .breadcrumb-row {
+            justify-content: space-between;
+            gap: 16px;
+            padding: 0 4px;
+        }
+
+        .crumbs {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            color: #3c4043;
+            font-size: 1.5rem;
+            font-weight: 600;
+        }
+
+        .crumbs small {
+            font-size: 0.88rem;
+            color: var(--muted);
+            font-weight: 500;
+        }
+
+        .view-toggle {
+            display: inline-flex;
+            align-items: center;
+            background: var(--panel);
+            border: 1px solid var(--border);
+            border-radius: 18px;
+            box-shadow: var(--shadow-soft);
+            overflow: hidden;
+        }
+
+        .view-toggle button {
+            border: none;
+            background: transparent;
+            width: 58px;
+            height: 38px;
+            cursor: pointer;
+            color: #5f6368;
+        }
+
+        .view-toggle button.active {
+            background: #d2e3fc;
+            color: #174ea6;
+        }
+
+        .callout {
+            background: #eef3fb;
+            border-radius: 20px;
+            padding: 16px 18px;
+            display: flex;
+            align-items: center;
+            gap: 14px;
+            min-height: 72px;
+        }
+
+        .callout-badge {
+            width: 192px;
+            min-width: 192px;
+            height: 36px;
+            border: 1px solid #d0d7e2;
+            border-radius: 999px;
+            background: white;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 8px;
+            font-weight: 700;
+            color: #1f2937;
+            box-shadow: 0 1px 3px rgba(60, 64, 67, 0.12);
+        }
+
+        .callout p {
+            margin: 0;
+            color: #3c4043;
+            font-size: 0.98rem;
+        }
+
+        .selected-bar {
+            justify-content: space-between;
+            gap: 16px;
+            background: #eef3fb;
+            border-radius: 999px;
+            min-height: 44px;
+            padding: 0 14px 0 16px;
+            box-shadow: var(--shadow-soft);
+        }
+
+        .selected-left,
+        .selected-actions {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+        }
+
+        .selected-chip {
+            width: 22px;
+            height: 22px;
+            border-radius: 50%;
+            border: 2px solid #5f6368;
+            display: grid;
+            place-items: center;
+            color: white;
+            font-size: 0.72rem;
+            background: transparent;
+        }
+
+        .selected-count {
+            font-weight: 600;
+            color: #3c4043;
+        }
+
+        .action-pill {
+            width: 34px;
+            height: 34px;
+            border: none;
+            border-radius: 50%;
+            background: transparent;
+            color: #5f6368;
+            cursor: pointer;
+            display: grid;
+            place-items: center;
+        }
+
+        .action-pill:hover { background: rgba(95, 99, 104, 0.12); }
+
+        .grid-shell {
+            background: transparent;
+            display: grid;
+            gap: 14px;
+        }
+
+        .history-grid {
+            display: grid;
+            grid-template-columns: repeat(5, minmax(0, 1fr));
+            gap: 18px 16px;
+        }
+
+        .history-card {
+            border: none;
+            background: transparent;
+            padding: 0;
+            text-align: left;
+            cursor: pointer;
+            min-width: 0;
+        }
+
+        .history-card-inner {
+            background: white;
+            border-radius: 16px;
+            box-shadow: var(--shadow-soft);
+            overflow: hidden;
+            transition: transform .18s ease, box-shadow .18s ease;
+            border: 2px solid transparent;
+        }
+
+        .history-card:hover .history-card-inner {
+            transform: translateY(-2px);
+            box-shadow: 0 10px 24px rgba(60, 64, 67, 0.16);
+        }
+
+        .history-card.selected .history-card-inner {
+            border-color: #1a73e8;
+            box-shadow: 0 0 0 3px rgba(26, 115, 232, 0.16);
+        }
+
+        .thumb-head {
+            height: 32px;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 8px 10px 0 10px;
+        }
+
+        .file-type {
+            display: inline-flex;
+            align-items: center;
+            gap: 7px;
+            font-size: 0.8rem;
+            color: #202124;
+            font-weight: 600;
+        }
+
+        .file-type::before {
+            content: '';
+            width: 14px;
+            height: 14px;
+            border-radius: 3px;
+            background: linear-gradient(135deg, #ea4335, #fbbc05);
+            box-shadow: inset 0 0 0 2px rgba(255,255,255,.75);
+        }
+
+        .menu-dot {
+            width: 26px;
+            height: 26px;
+            border: none;
+            background: transparent;
+            border-radius: 50%;
+            color: #5f6368;
+            cursor: pointer;
+        }
+
+        .menu-dot:hover { background: #f1f3f4; }
+
+        .thumb-image-wrap {
+            padding: 0 8px 8px;
+        }
+
+        .thumb-image {
+            width: 100%;
+            aspect-ratio: 1 / 1;
+            border-radius: 10px;
+            overflow: hidden;
+            background: #e8eef8;
+        }
+
+        .thumb-image img {
+            width: 100%;
+            height: 100%;
+            object-fit: cover;
+            display: block;
+        }
+
+        .card-footer {
+            padding: 0 10px 12px;
+            display: grid;
+            gap: 8px;
+        }
+
+        .card-title {
+            margin: 0;
+            font-size: 0.95rem;
+            line-height: 1.45;
+            color: #1f1f1f;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+
+        .card-subtitle {
+            margin: 0;
+            color: #5f6368;
+            font-size: 0.82rem;
+            line-height: 1.45;
+            min-height: 2.6em;
+        }
+
+        .card-meta-row {
+            justify-content: space-between;
+            gap: 8px;
+            font-size: 0.78rem;
+            color: #5f6368;
+        }
+
+        .status-dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background: #34a853;
+            display: inline-block;
+            margin-right: 6px;
+        }
+
+        .status-dot.failed { background: #ea4335; }
+        .status-text { font-weight: 600; }
+
+        .empty-state {
+            background: white;
+            border: 1px solid var(--border);
+            border-radius: 22px;
+            padding: 36px;
+            text-align: center;
+            color: var(--muted);
+        }
+
+        .modal {
+            position: fixed;
+            inset: 0;
+            z-index: 120;
+        }
+
+        .modal-backdrop {
+            position: absolute;
+            inset: 0;
+            background: rgba(32, 33, 36, 0.45);
+            backdrop-filter: blur(8px);
+        }
+
+        .modal-content {
+            position: relative;
+            width: min(1280px, calc(100vw - 24px));
+            margin: 72px auto 20px;
+            max-height: calc(100vh - 92px);
+            background: white;
+            border-radius: 24px;
+            box-shadow: 0 24px 60px rgba(60, 64, 67, 0.28);
+            overflow: hidden;
+        }
+
+        .close-btn {
+            position: absolute;
+            right: 18px;
+            top: 18px;
+            width: 40px;
+            height: 40px;
+            border: none;
+            border-radius: 50%;
+            background: rgba(255,255,255,0.82);
+            cursor: pointer;
+            z-index: 2;
+            font-size: 1.55rem;
+        }
+
+        .modal-body {
+            display: grid;
+            grid-template-columns: 1.25fr 0.95fr;
+            min-height: min(760px, calc(100vh - 92px));
+        }
+
+        .modal-image-panel {
+            background: #1f2937;
+            display: grid;
+            place-items: center;
+            padding: 28px;
+        }
+
+        .modal-image-panel img {
+            width: 100%;
+            max-height: calc(100vh - 180px);
+            object-fit: contain;
+            border-radius: 18px;
+            background: white;
+            box-shadow: 0 18px 36px rgba(0, 0, 0, 0.25);
+        }
+
+        .modal-info-panel {
+            padding: 28px 26px 24px;
+            overflow: auto;
+        }
+
+        .modal-top { justify-content: space-between; gap: 16px; margin-bottom: 18px; }
+        .modal-eyebrow { font-size: 0.72rem; }
+        .modal-top h3 { margin: 4px 0 0; font-size: 1.3rem; }
+        .status-badge {
+            padding: 8px 12px;
+            border-radius: 999px;
+            font-weight: 700;
+            font-size: 0.85rem;
+            white-space: nowrap;
+        }
+        .status-badge.success { background: rgba(52, 168, 83, 0.12); color: var(--green); }
+        .status-badge.failed { background: rgba(234, 67, 53, 0.12); color: var(--red); }
+
+        .modal-stats {
+            gap: 12px;
+            margin-bottom: 16px;
+            flex-wrap: wrap;
+        }
+
+        .meta-card {
+            background: #f8fbff;
+            border: 1px solid var(--border);
+            border-radius: 16px;
+            padding: 12px 14px;
+            min-width: 146px;
+        }
+
+        .meta-card span {
+            display: block;
+            font-size: 0.78rem;
+            color: var(--muted);
+            margin-bottom: 5px;
+        }
+
+        .meta-card strong { font-size: 0.96rem; }
+
+        .json-block {
+            margin-top: 18px;
+        }
+
+        .json-block h4 {
+            margin: 0 0 10px;
+            font-size: 0.98rem;
+        }
+
+        .json-block pre {
+            margin: 0;
+            background: #0f172a;
+            color: #e2e8f0;
+            border-radius: 18px;
+            padding: 16px;
+            overflow: auto;
+            max-height: 320px;
+            font-size: 0.88rem;
+            line-height: 1.6;
+        }
+
+        .json-block code {
+            font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+        }
+
+        @media (max-width: 1500px) {
+            .history-grid { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+        }
+
+        @media (max-width: 1250px) {
+            .history-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+            .searchbar { width: min(640px, 42vw); }
+        }
+
+        @media (max-width: 980px) {
+            .app-shell { grid-template-columns: 1fr; }
+            .side-rail {
+                position: fixed;
+                inset: auto 0 0 0;
+                width: 100%;
+                height: 64px;
+                flex-direction: row;
+                justify-content: space-around;
+                padding: 0 12px;
+            }
+            .main { grid-column: 1; padding-bottom: 92px; }
+            .topbar { padding-right: 12px; }
+            .brand-mini { min-width: auto; }
+            .searchbar { width: 40vw; }
+            .breadcrumb-row { flex-direction: column; align-items: flex-start; }
+            .history-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+            .modal-body { grid-template-columns: 1fr; }
+        }
+
+        @media (max-width: 680px) {
+            .searchbar { display: none; }
+            .main { padding: 82px 14px 88px; }
+            .callout { flex-direction: column; align-items: flex-start; }
+            .callout-badge { width: 100%; min-width: 0; }
+            .history-grid { grid-template-columns: 1fr; }
+            .modal-content { width: calc(100vw - 14px); margin: 70px auto 10px; }
+            .modal-info-panel { padding: 20px 16px 18px; }
+        }
+    </style>
+</head>
+<body>
+    <header class="topbar">
+        <div class="topbar-left">
+            <div class="brand-mini">
+                <div class="brand-mark" aria-hidden="true"></div>
+                <div class="brand-text">雲端硬碟</div>
+            </div>
+            <div class="searchbar" role="search">
+                <span>🔍</span>
+                <input type="search" placeholder="在雲端硬碟中搜尋" aria-label="搜尋歷史紀錄">
+            </div>
+        </div>
+        <div class="topbar-right" aria-label="工具列">
+            <button class="icon-pill" type="button" aria-label="說明">?</button>
+            <button class="icon-pill" type="button" aria-label="設定">⚙</button>
+            <button class="icon-pill" type="button" aria-label="更多選項">✦</button>
+            <button class="icon-pill" type="button" aria-label="應用程式">▦</button>
+            <button class="avatar-pill" type="button" aria-label="使用者">超</button>
+        </div>
+    </header>
+
+    <div class="app-shell">
+        <aside class="side-rail" aria-label="導覽">
+            <button class="rail-item active" type="button" data-filter="all" aria-label="全部歷史">
+                <span>☰</span>
+            </button>
+            <div class="rail-label">首頁</div>
+            <button class="rail-item" type="button" data-filter="remove_bg" aria-label="去背">
+                <span>⤓</span>
+            </button>
+            <div class="rail-label">去背</div>
+            <button class="rail-item" type="button" data-filter="tryon_2d" aria-label="2D">
+                <span>◫</span>
+            </button>
+            <div class="rail-label">2D</div>
+            <button class="rail-item" type="button" data-filter="reconstruct_3d" aria-label="3D">
+                <span>⬡</span>
+            </button>
+            <div class="rail-label">3D</div>
+        </aside>
+
+        <main class="main">
+            <div class="content-shell">
+                <div class="breadcrumb-row">
+                    <div class="crumbs">
+                        <span>我的雲端硬碟</span>
+                        <span>›</span>
+                        <span>照片 <small id="current-filter-label">全部歷史</small></span>
+                    </div>
+                    <div class="view-toggle" aria-label="檢視切換">
+                        <button class="active" type="button" aria-label="列表檢視">☰</button>
+                        <button class="active" type="button" aria-label="格狀檢視">☷</button>
+                        <button type="button" aria-label="資訊">i</button>
+                    </div>
+                </div>
+
+                <div class="callout">
+                    <div class="callout-badge"><span>✦</span><span>透過 Gemini 探索</span></div>
+                    <p>總結及分析這個資料夾中的檔案內容，快速掌握重點。</p>
+                </div>
+
+                <div id="selected-bar" class="selected-bar hidden">
+                    <div class="selected-left">
+                        <button class="action-pill" type="button" aria-label="取消選取">✕</button>
+                        <span class="selected-count" id="selected-count">已選取 0 個項目</span>
+                    </div>
+                    <div class="selected-actions" aria-label="項目動作">
+                        <button class="action-pill" type="button" aria-label="分享">👥</button>
+                        <button class="action-pill" type="button" aria-label="下載">⭳</button>
+                        <button class="action-pill" type="button" aria-label="移動">▢</button>
+                        <button class="action-pill" type="button" aria-label="刪除">🗑</button>
+                        <button class="action-pill" type="button" aria-label="連結">🔗</button>
+                        <button class="action-pill" type="button" aria-label="更多">⋮</button>
+                    </div>
+                </div>
+
+                <section class="grid-shell">
+                    <div id="history-grid" class="history-grid" aria-live="polite"></div>
+                    <div id="empty-state" class="empty-state hidden">
+                        <h3>目前沒有符合條件的歷史紀錄</h3>
+                        <p>切換其他分類看看，或之後接上 API 後會自動顯示真實資料。</p>
+                    </div>
+                </section>
+            </div>
+        </main>
+    </div>
+
+    <div id="history-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="modal-title">
+        <div class="modal-backdrop" data-close-modal></div>
+        <div class="modal-content">
+            <button class="close-btn" type="button" aria-label="關閉視窗" data-close-modal>×</button>
+            <div class="modal-body">
+                <div class="modal-image-panel">
+                    <img id="modal-img" src="" alt="大圖預覽">
+                </div>
+                <div class="modal-info-panel">
+                    <div class="modal-top">
+                        <div>
+                            <span class="modal-eyebrow" id="modal-type"></span>
+                            <h3 id="modal-title">詳細執行資訊</h3>
+                        </div>
+                        <span id="modal-status" class="status-badge"></span>
+                    </div>
+
+                    <div class="modal-stats">
+                        <div class="meta-card">
+                            <span>開始時間</span>
+                            <strong id="modal-start"></strong>
+                        </div>
+                        <div class="meta-card">
+                            <span>結束時間</span>
+                            <strong id="modal-end"></strong>
+                        </div>
+                        <div class="meta-card">
+                            <span>總耗時</span>
+                            <strong id="modal-time"></strong>
+                        </div>
+                        <div class="meta-card">
+                            <span>執行結果</span>
+                            <strong id="modal-result"></strong>
+                        </div>
+                    </div>
+
+                    <div class="json-block">
+                        <h4>Response JSON</h4>
+                        <pre><code id="modal-json"></code></pre>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        (() => {
+            const historyGrid = document.getElementById('history-grid');
+            const emptyState = document.getElementById('empty-state');
+            const selectedBar = document.getElementById('selected-bar');
+            const selectedCount = document.getElementById('selected-count');
+            const currentFilterLabel = document.getElementById('current-filter-label');
+            const modal = document.getElementById('history-modal');
+            const modalImg = document.getElementById('modal-img');
+            const modalType = document.getElementById('modal-type');
+            const modalStatus = document.getElementById('modal-status');
+            const modalStart = document.getElementById('modal-start');
+            const modalEnd = document.getElementById('modal-end');
+            const modalTime = document.getElementById('modal-time');
+            const modalResult = document.getElementById('modal-result');
+            const modalJson = document.getElementById('modal-json');
+            const modalTitle = document.getElementById('modal-title');
+            const filterButtons = Array.from(document.querySelectorAll('[data-filter]'));
+
+            const operationLabels = {
+                all: '全部歷史',
+                remove_bg: '去背',
+                tryon_2d: '2D',
+                reconstruct_3d: '3D',
+            };
+
+            const mockRecords = [
+                { id: 1, filter: 'remove_bg', type: '去背', status: 'success', title: 'IMG202011160719...', subtitle: '衣物輪廓清楚，背景已順利移除。', createdAt: '2026-05-15 09:42', start: '2026-05-15 09:41:22', end: '2026-05-15 09:41:31', duration: '9.2 s', result: '輸出透明背景 PNG', image: makeCardImage('#4285f4', '#d2e3fc', 'BG'), largeImage: makeLargeImage('#174ea6', '#8ab4f8', 'REMOVE BG'), response: { code: 200, message: '1200', data: { file_name: 'shirt_no_bg.png', style_analysis: 'clean-cut' } } },
+                { id: 2, filter: 'tryon_2d', type: '2D', status: 'success', title: 'IMG202011160735...', subtitle: '模特與衣服順利對齊，輸出結果正常。', createdAt: '2026-05-15 10:18', start: '2026-05-15 10:17:48', end: '2026-05-15 10:18:21', duration: '32.8 s', result: '生成試穿合成圖', image: makeCardImage('#7c3aed', '#ede9fe', '2D'), largeImage: makeLargeImage('#4c1d95', '#c4b5fd', 'TRY ON 2D'), response: { code: 200, message: '2200', data: { file_name: 'tryon_2d.png', style_name: 'casual', file_format: 'PNG' } } },
+                { id: 3, filter: 'reconstruct_3d', type: '3D', status: 'success', title: 'IMG202011160752...', subtitle: '完成 GLB 輸出，可切換多個觀看角度。', createdAt: '2026-05-15 11:03', start: '2026-05-15 11:01:57', end: '2026-05-15 11:03:06', duration: '68.9 s', result: '輸出 3D 模型檔', image: makeCardImage('#0f9d58', '#d1fae5', '3D'), largeImage: makeLargeImage('#065f46', '#6ee7b7', '3D MODEL'), response: { code: 200, message: '4200', data: { glb_file: 'person.glb', texture_aligned: true } } },
+                { id: 4, filter: 'remove_bg', type: '去背', status: 'failed', title: 'IMG202011160804...', subtitle: '主體不完整，觸發品質檢查錯誤。', createdAt: '2026-05-15 11:34', start: '2026-05-15 11:34:01', end: '2026-05-15 11:34:05', duration: '4.1 s', result: '請上傳更完整的人像', image: makeCardImage('#ea4335', '#fce8e6', 'ERR'), largeImage: makeLargeImage('#7f1d1d', '#fecaca', 'FAILED'), response: { code: 422, message: '1422', debug_info: { ui_behavior: '請上傳比例正常的圖片' } } },
+                { id: 5, filter: 'tryon_2d', type: '2D', status: 'success', title: 'IMG202011160812...', subtitle: '衣服紋理對齊更穩定，邊界也更自然。', createdAt: '2026-05-15 12:07', start: '2026-05-15 12:06:12', end: '2026-05-15 12:06:39', duration: '27.4 s', result: '生成完整合成圖', image: makeCardImage('#fbbc05', '#fef7cd', '2D'), largeImage: makeLargeImage('#92400e', '#fde68a', 'TRY ON B'), response: { code: 200, message: '2200', data: { file_name: 'tryon_dress.png', style_name: 'formal', file_format: 'PNG' } } },
+                { id: 6, filter: 'reconstruct_3d', type: '3D', status: 'failed', title: 'IMG202011160829...', subtitle: '模型有生成，但材質對齊需要再調整。', createdAt: '2026-05-15 12:42', start: '2026-05-15 12:41:20', end: '2026-05-15 12:42:18', duration: '58.7 s', result: '紋理對齊失敗', image: makeCardImage('#00acc1', '#ccfbf1', '3D'), largeImage: makeLargeImage('#134e4a', '#99f6e4', 'ALIGN ERR'), response: { code: 500, message: '4500', debug_info: { error_detail: 'texture alignment failed' } } },
+            ];
+
+            let activeFilter = 'all';
+            let selectedIds = new Set();
+
+            function makeCardImage(background, accent, label) {
+                const svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 320"><defs><linearGradient id="g" x1="0" x2="1" y1="0" y2="1"><stop offset="0%" stop-color="${background}"/><stop offset="100%" stop-color="${accent}"/></linearGradient></defs><rect width="320" height="320" rx="32" fill="url(#g)"/><circle cx="118" cy="118" r="54" fill="rgba(255,255,255,0.58)"/><rect x="82" y="156" width="156" height="98" rx="28" fill="rgba(255,255,255,0.74)"/><text x="160" y="282" fill="#0f172a" font-size="56" font-weight="700" text-anchor="middle" font-family="Arial, sans-serif">${label}</text></svg>`;
+                return `data:image/svg+xml;charset=UTF-8,${encodeURIComponent(svg)}`;
+            }
+
+            function makeLargeImage(background, accent, label) {
+                const svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 720"><defs><linearGradient id="g2" x1="0" x2="1" y1="0" y2="1"><stop offset="0%" stop-color="${background}"/><stop offset="100%" stop-color="${accent}"/></linearGradient></defs><rect width="960" height="720" rx="36" fill="url(#g2)"/><rect x="150" y="96" width="660" height="528" rx="40" fill="rgba(255,255,255,0.24)" stroke="rgba(255,255,255,0.42)"/><circle cx="360" cy="250" r="100" fill="rgba(255,255,255,0.72)"/><rect x="250" y="318" width="460" height="198" rx="56" fill="rgba(255,255,255,0.8)"/><text x="480" y="626" fill="#ffffff" font-size="74" font-weight="700" text-anchor="middle" font-family="Arial, sans-serif">${label}</text></svg>`;
+                return `data:image/svg+xml;charset=UTF-8,${encodeURIComponent(svg)}`;
+            }
+
+            function formatResponse(response) {
+                return JSON.stringify(response, null, 2);
+            }
+
+            function updateSelectedBar() {
+                const count = selectedIds.size;
+                selectedCount.textContent = `已選取 ${count} 個項目`;
+                selectedBar.classList.toggle('hidden', count === 0);
+            }
+
+            function setActiveFilter(filter) {
+                activeFilter = filter;
+                currentFilterLabel.textContent = operationLabels[filter] || '全部歷史';
+                filterButtons.forEach((button) => {
+                    if (button.dataset.filter === filter) {
+                        button.classList.add('active');
+                    } else if (button.closest('.side-rail')) {
+                        button.classList.remove('active');
+                    }
+                });
+                renderCards();
+            }
+
+            function renderCards() {
+                const records = activeFilter === 'all'
+                    ? mockRecords
+                    : mockRecords.filter((record) => record.filter === activeFilter);
+
+                historyGrid.innerHTML = '';
+                emptyState.classList.toggle('hidden', records.length !== 0);
+
+                records.forEach((record) => {
+                    const card = document.createElement('button');
+                    card.type = 'button';
+                    card.className = `history-card${selectedIds.has(record.id) ? ' selected' : ''}`;
+                    card.setAttribute('aria-label', `${record.title}，點擊查看詳情`);
+                    card.dataset.recordId = String(record.id);
+
+                    card.innerHTML = `
+                        <div class="history-card-inner">
+                            <div class="thumb-head">
+                                <div class="file-type">IMG</div>
+                                <button class="menu-dot" type="button" aria-label="更多">⋮</button>
+                            </div>
+                            <div class="thumb-image-wrap">
+                                <div class="thumb-image"><img src="${record.image}" alt="${record.title}"></div>
+                            </div>
+                            <div class="card-footer">
+                                <h3 class="card-title">${record.title}</h3>
+                                <p class="card-subtitle">${record.subtitle}</p>
+                                <div class="card-meta-row">
+                                    <span>${record.createdAt}</span>
+                                    <span><span class="status-dot ${record.status === 'failed' ? 'failed' : ''}"></span><span class="status-text">${record.status === 'success' ? '成功' : '失敗'}</span></span>
+                                </div>
+                            </div>
+                        </div>
+                    `;
+
+                    card.addEventListener('click', () => {
+                        selectedIds = new Set([record.id]);
+                        updateSelectedBar();
+                        renderCards();
+                        openModal(record);
+                    });
+
+                    historyGrid.appendChild(card);
+                });
+            }
+
+            function openModal(record) {
+                modalImg.src = record.largeImage;
+                modalImg.alt = record.title;
+                modalType.textContent = record.type;
+                modalTitle.textContent = record.title;
+                modalStatus.textContent = record.status === 'success' ? '成功' : '失敗';
+                modalStatus.className = `status-badge ${record.status}`;
+                modalStart.textContent = record.start;
+                modalEnd.textContent = record.end;
+                modalTime.textContent = record.duration;
+                modalResult.textContent = record.result;
+                modalJson.textContent = formatResponse(record.response);
+                modal.classList.remove('hidden');
+                document.body.style.overflow = 'hidden';
+            }
+
+            function closeModal() {
+                modal.classList.add('hidden');
+                document.body.style.overflow = '';
+            }
+
+            filterButtons.forEach((button) => {
+                button.addEventListener('click', () => {
+                    selectedIds.clear();
+                    updateSelectedBar();
+                    setActiveFilter(button.dataset.filter || 'all');
+                });
+            });
+
+            modal.addEventListener('click', (event) => {
+                if (event.target.matches('[data-close-modal]')) {
+                    closeModal();
+                }
+            });
+
+            document.addEventListener('keydown', (event) => {
+                if (event.key === 'Escape' && !modal.classList.contains('hidden')) {
+                    closeModal();
+                }
+            });
+
+            updateSelectedBar();
+            renderCards();
+        })();
+    </script>
+</body>
+</html>
