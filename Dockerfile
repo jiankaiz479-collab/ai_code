@@ -11,7 +11,7 @@ ENV PYTHONUNBUFFERED=1 \
 # 2. 安裝系統套件
 # 這裡維持不變，但 Docker 只要看過這層沒變，就不會重新 apt-get
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    git build-essential \
+    git build-essential wget \
     libgl1 libglib2.0-0 libsm6 libxext6 libxrender1 libgomp1 \
     ca-certificates curl \
     && rm -rf /var/lib/apt/lists/*

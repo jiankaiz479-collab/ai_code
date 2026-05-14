@@ -253,6 +253,50 @@ return TryOn3DResult(ok=True, glb_bytes=recon.glb_bytes, ...)
 
 ---
 
+## 架構演進：LLM Router 雙軌路由（2026-05-13 決策，Roadmap v3）
+
+### 觸發點
+系統上線後發現使用者上傳的照片分兩大類：「平鋪/掛在衣架上」與「真人穿著照片」。
+現有 `rembg` 在前者表現完美，但在後者會把整個人當前景切下。若換成服裝分割模型，在平鋪照上又會因找不到人體而失效。
+
+### 設計選擇
+
+| 選項 | 優點 | 缺點 |
+|---|---|---|
+| A) 前端加按鈕讓使用者選 | 最簡單 | 破壞 UX，使用者容易選錯 |
+| B) 把圖同時丟給兩種模型 | 總會有一個成功 | 運算成本翻倍，且難以判斷要相信哪一個結果 |
+| **C) LLM 路由 (Router) + 雙軌並行** | 零 UX 負擔、零運算浪費 | 需要擴充 v2 預檢層邏輯 |
+
+**選擇：C**
+
+### 設計細節
+結合之前實作的 Strategy Pattern 與 Gemini 預檢層：
+1. **擴充 Prompt**：在 v2 擋爛圖的 Prompt 中，要求 Gemini 多輸出一欄 `"presentation_mode": "worn_on_body" | "flat_lay" | "on_hanger"`。
+2. **後端 Router**：
+   ```python
+   presentation = validation_result["presentation_mode"]
+   if presentation in ["flat_lay", "on_hanger"]:
+       # 情境 A：走舊路徑 (rembg)
+       strategy = RobustRemoveBg()
+   elif presentation == "worn_on_body":
+       # 情境 B：走新路徑 (Human Parsing)，自動切分上下身
+       strategy = HumanParsingRemoveBg()
+   ```
+
+### 附帶 UX 升級：全自動部位拆解
+這套架構讓前端 API 達到「**無參數化**」。使用者傳全身照進來，`HumanParsingRemoveBg` 跑一次推論後，自動包裝出 `{"upper": 上衣圖, "lower": 褲子圖}` 回傳。
+
+### 學到的設計觀念
+1. **LLM 作為路由器 (Router)**：大語言模型不只是拿來聊天或分析，它也是極佳的「分類器」，能用極低成本導流傳統程式的走向。
+2. **One Inference, Multiple Outputs**：如果模型一次能生出全身上下的部位標籤，就應該讓後端一次把它們全拆分好，而不是讓前端呼叫兩次 API 分別要求「我要上衣」跟「我要褲子」。
+
+### 推甄面試 30 秒講法（LLM Router 版）
+> 「我遇到一個難題：『平鋪圖』和『真人穿搭照』需要的去背模型完全不同。如果讓前端加按鈕讓使用者選，體驗很差；如果只用一個模型，必定有一種情境會失敗。
+> 
+> 我的解法是導入 **LLM Router**。因為我原本就有用 Gemini 做防呆預檢，我只改了一行 Prompt，讓 Gemini 順便幫我判斷這張圖是平鋪還是真人穿著。後端拿到 JSON 後，動態把平鋪圖導給 `rembg`、真人圖導給 `Human Parsing 模型`。這達成了『零額外成本、零前端改動』，完美解決了多情境的問題。」
+
+---
+
 ## 推甄面試 30 秒架構講法
 
 > 「我把後端切成 4 層：URL 路由、View 入口、AI Services、抽象介面。

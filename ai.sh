@@ -19,6 +19,16 @@ echo "======================================================="
 echo "🛡️  正在進行系統全面檢查與初始化..."
 echo "======================================================="
 
+# ---------------------------------------------------------
+# 0) 自動下載服裝部位分割 ONNX 模型 (供 v3 Human Parsing 使用)
+# ---------------------------------------------------------
+mkdir -p models
+if [ ! -f "models/u2net_cloth_seg.onnx" ]; then
+    echo "⬇️ Downloading u2net_cloth_seg ONNX model (approx. 170MB)..."
+    wget -O models/u2net_cloth_seg.onnx "https://github.com/danielgatis/rembg/releases/download/v0.0.0/u2net_cloth_seg.onnx"
+    echo "✅ Model downloaded successfully."
+fi
+
 
 # ---------------------------------------------------------
 # 3) 檢查並建置 Docker 映像檔 (2D 服務)
@@ -51,6 +61,7 @@ docker run -d \
   --env-file .env \
   -v "$(pwd)/ai_app:/app/ai_app" \
   -v "$(pwd)/media:/app/media" \
+  -v "$(pwd)/models:/app/models" \
   -e U2NET_HOME=/app/.u2net \
   "${APP_IMAGE}"
 
@@ -58,4 +69,3 @@ echo "======================================================="
 echo "🎉 全系統配置完成！"
 echo "🔗 服務位址：http://localhost:${RUN_PORT}"
 echo "======================================================="
-

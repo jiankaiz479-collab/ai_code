@@ -101,6 +101,11 @@ class RemoveBgView(View):
                 "style_analysis": result.style_analysis,
             }
         }
+        
+        # 如果有多部位拆解，將檔名加入 JSON 讓前端知道
+        if result.extracted_items_data:
+            analysis_data["data"]["extracted_items"] = {k: v["file_name"] for k, v in result.extracted_items_data.items()}
+            
         json_pretty = json.dumps(analysis_data, indent=4, ensure_ascii=False)
         boundary = 'bg_removal_boundary'
         body = [
@@ -109,7 +114,17 @@ class RemoveBgView(View):
         ]
         with open(result.file_path, 'rb') as f:
             body.append(f.read())
-        body.append(f'\r\n--{boundary}--\r\n'.encode('utf-8'))
+        body.append(b'\r\n')
+        
+        # 附加多部位的實體圖片檔案 (例如 name="upper" / name="lower")
+        if result.extracted_items_data:
+            for part_name, part_data in result.extracted_items_data.items():
+                body.append(f'--{boundary}\r\nContent-Disposition: form-data; name="{part_name}"; filename="{part_data["file_name"]}"\r\nContent-Type: image/png\r\n\r\n'.encode('utf-8'))
+                with open(part_data["file_path"], 'rb') as f:
+                    body.append(f.read())
+                body.append(b'\r\n')
+                
+        body.append(f'--{boundary}--\r\n'.encode('utf-8'))
 
         logger.info(f"🎉 [G2] 去背完成！總耗時: {time.time()-start_time:.2f}s")
         return HttpResponse(b''.join(body), content_type=f'multipart/form-data; boundary={boundary}')
