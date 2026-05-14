@@ -155,3 +155,11 @@ LOGGING = {
         },
     },
 }
+
+# MinIO 連線設定
+MINIO_ENDPOINT = os.getenv('MINIO_INTERNAL_ENDPOINT', 'ai-minio:9002') # 換個變數名稱，避免被 .env 舊設定覆蓋
+MINIO_EXTERNAL_ENDPOINT = os.getenv('MINIO_EXTERNAL_ENDPOINT', 'localhost:9002') # 前端讀圖用
+MINIO_ACCESS_KEY = os.getenv('MINIO_ROOT_USER', 'minioadmin')
+MINIO_SECRET_KEY = os.getenv('MINIO_ROOT_PASSWORD', 'minioadmin')
+MINIO_SECURE = os.getenv('MINIO_SECURE', 'false').lower() in ('1', 'true', 'yes')
+MINIO_BUCKET_HISTORY = os.getenv('MINIO_BUCKET_HISTORY', 'history-images')

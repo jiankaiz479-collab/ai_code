@@ -6,6 +6,7 @@ from .views import (
     Reconstruct_3D,
     TryOn3DOutfitView,
     HistoryPageView,
+    HistoryApiView,
 )
 
 urlpatterns = [
@@ -19,4 +20,5 @@ urlpatterns = [
 
     # 前端頁面
     path('history/', HistoryPageView.as_view(), name='history_page'),
+    path('api/history/', HistoryApiView.as_view(), name='api_history'),
 ]

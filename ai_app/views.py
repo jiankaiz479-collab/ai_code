@@ -15,6 +15,8 @@ from .services.remove_bg_service import RemoveBgService
 from .services.try_on_service import TryOnService
 from .services.reconstruct_3d_service import Reconstruct3DService, Reconstruct3DOptions
 from .services.try_on_3d_service import TryOn3DService
+from .models import HistoryRecord
+from django.conf import settings
 
 # ==========================================
 # 1. 去背功能 (Remove Background)
@@ -422,6 +424,45 @@ class HistoryPageView(View):
     """
     def get(self, request, *args, **kwargs):
         return render(request, 'ai_app/history.html')
+
+
+# ==========================================
+# 7. 歷史紀錄 API (Fetch History)
+# ==========================================
+class HistoryApiView(View):
+    def get(self, request, *args, **kwargs):
+        operation = request.GET.get('operation', 'all')
+        qs = HistoryRecord.objects.all()
+        if operation != 'all':
+            qs = qs.filter(operation=operation)
+            
+        data = []
+        for record in qs[:50]:  # 暫時回傳最新 50 筆
+            data.append({
+                "id": record.id,
+                "filter": record.operation,
+                "type": {"remove_bg": "去背", "tryon_2d": "2D", "reconstruct_3d": "3D"}.get(record.operation, record.operation),
+                "status": record.status,
+                "title": f"任務 #{record.id}",
+                "subtitle": "執行完成" if record.status == 'success' else "執行失敗",
+                "createdAt": record.created_at.strftime('%Y-%m-%d %H:%M'),
+                "start": record.start_ts.strftime('%Y-%m-%d %H:%M:%S') if record.start_ts else "",
+                "end": record.end_ts.strftime('%Y-%m-%d %H:%M:%S') if record.end_ts else "",
+                "duration": f"{record.exec_time_ms / 1000.0:.1f} s",
+                "result": "輸出成功" if record.status == 'success' else "發生錯誤",
+                "image": self._get_url(record.bucket, record.thumb_key),
+                "largeImage": self._get_url(record.bucket, record.object_key),
+                "response": record.response_json,
+            })
+        return JsonResponse({"results": data})
+        
+    def _get_url(self, bucket, key):
+        if not key:
+            return "https://via.placeholder.com/400?text=No+Image"
+        endpoint = getattr(settings, 'MINIO_EXTERNAL_ENDPOINT', 'localhost:9002')
+        if not endpoint.startswith('http'):
+            endpoint = f"http://{endpoint}"
+        return f"{endpoint}/{bucket}/{key}"
 
 
 # ==========================================

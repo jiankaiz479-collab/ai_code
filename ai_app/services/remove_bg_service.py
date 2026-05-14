@@ -15,6 +15,10 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import Optional
+from django.utils import timezone
+from django.conf import settings
+from ai_app.models import HistoryRecord
+from .storage_service import StorageService
 
 from PIL import Image
 
@@ -52,6 +56,7 @@ class RemoveBgService:
     def process(self, pil_image: Image.Image) -> RemoveBgServiceResult:
         result = RemoveBgServiceResult()
         t_start = time.time()
+        start_ts = timezone.now()
 
         try:
             pipeline = get_remove_bg_pipeline(self.processor)
@@ -101,6 +106,27 @@ class RemoveBgService:
             logger.exception(f"💥 RemoveBgService 失敗: {str(e)}")
             result.code = "1500"
             result.error_detail = f"系統發生非預期錯誤: {str(e)}"
+
+        end_ts = timezone.now()
+        exec_time_ms = int((time.time() - t_start) * 1000)
+
+        # 寫入歷史紀錄 (不阻斷主流程)
+        try:
+            storage = StorageService()
+            obj_key, thumb_key = storage.upload_image(result.image, prefix="remove_bg") if result.image else (None, None)
+            HistoryRecord.objects.create(
+                operation="remove_bg",
+                status="success" if result.ok else "failed",
+                bucket=getattr(settings, 'MINIO_BUCKET_HISTORY', 'history-images'),
+                object_key=obj_key,
+                thumb_key=thumb_key,
+                response_json={"code": result.code, "data": result.style_analysis} if result.ok else {"code": result.code, "error": result.error_detail},
+                start_ts=start_ts,
+                end_ts=end_ts,
+                exec_time_ms=exec_time_ms
+            )
+        except Exception as e:
+            logger.error(f"寫入 HistoryRecord 失敗: {e}")
 
         result.timings["total"] = time.time() - t_start
         return result

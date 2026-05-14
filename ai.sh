@@ -33,7 +33,10 @@ fi
 # ---------------------------------------------------------
 # 3) 檢查並建置 Docker 映像檔 (2D 服務)
 # ---------------------------------------------------------
-if [[ "$(docker images -q ${APP_IMAGE} 2> /dev/null)" == "" ]]; then
+if [ "$FORCE_BUILD" = true ]; then
+    echo "🛠️ [1/2] 狀態：偵測到 --build 參數，強制重新建置 Docker 映像..."
+    docker build -t "${APP_IMAGE}" .
+elif [[ "$(docker images -q ${APP_IMAGE} 2> /dev/null)" == "" ]]; then
     echo "🔍 [1/2] 狀態：未偵測到 Docker 映像。正在建置..."
     docker build -t "${APP_IMAGE}" .
 else
@@ -52,16 +55,16 @@ docker rm ai-minio >/dev/null 2>&1 || true
 docker run -d \
   --name ai-minio \
   --network app-network \
-  -p 9002:9000 \
-  -p 10092:9001 \
+  -p 9002:9002 \
+  -p 10092:10092 \
   -e MINIO_ROOT_USER=minioadmin \
   -e MINIO_ROOT_PASSWORD=minioadmin \
   -v "$(pwd)/minio_data:/data" \
-  minio/minio server /data --console-address ":9001"
+  minio/minio server /data --address ":9002" --console-address ":10092"
 
 echo "⏳ 正在等待 MinIO 啟動並建立 Bucket..."
 sleep 3
-docker run --rm --network app-network --entrypoint sh minio/mc -c "mc alias set myminio http://ai-minio:9000 minioadmin minioadmin && mc mb myminio/history-images --ignore-existing && mc anonymous set public myminio/history-images"
+docker run --rm --network app-network --entrypoint sh minio/mc -c "mc alias set myminio http://ai-minio:9002 minioadmin minioadmin && mc mb myminio/history-images --ignore-existing && mc anonymous set public myminio/history-images"
 
 # ---------------------------------------------------------
 # 4) 啟動 Docker 容器
@@ -80,9 +83,10 @@ docker rm "${CONTAINER_NAME}" >/dev/null 2>&1 || true
 docker run -d \
   --name "${CONTAINER_NAME}" \
   --network app-network \
-  -p "${RUN_PORT}:8002" \
+  -p "${RUN_PORT}:${RUN_PORT}" \
   --env-file .env \
   -v "$(pwd)/ai_app:/app/ai_app" \
+  -v "$(pwd)/cv_testing_site:/app/cv_testing_site" \
   -v "$(pwd)/media:/app/media" \
   -v "$(pwd)/models:/app/models" \
   -e U2NET_HOME=/app/.u2net \

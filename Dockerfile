@@ -39,6 +39,6 @@ COPY . .
 RUN python -c "import os; from rembg import new_session; \
     if not os.path.exists(os.environ.get('U2NET_HOME')): new_session()" || true
 
-EXPOSE 8002
+EXPOSE ${RUN_PORT:-8002}
 
-CMD ["sh", "-c", "python manage.py migrate && python manage.py runserver 0.0.0.0:8002"]
+CMD ["sh", "-c", "python manage.py migrate && python manage.py runserver 0.0.0.0:${RUN_PORT:-8002}"]
