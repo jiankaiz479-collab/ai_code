@@ -637,7 +637,7 @@ class AIProcessor(ImageProcessingInterface):
     TRIPO_DEFAULT_TEXTURE_QUALITY = os.getenv("TRIPO_TEXTURE_QUALITY", "detailed")
     TRIPO_DEFAULT_FACE_LIMIT = int(os.getenv("TRIPO_FACE_LIMIT", "100000"))
     TRIPO_DEFAULT_PBR = os.getenv("TRIPO_PBR", "true").lower() in ("1", "true", "yes")
-    TRIPO_DEFAULT_MODEL_VERSION = os.getenv("TRIPO_MODEL_VERSION", "v3.1-20260211")
+    TRIPO_DEFAULT_MODEL_VERSION = os.getenv("TRIPO_MODEL_VERSION", "v2.5-20250123")
     TRIPO_DEFAULT_TEXTURE_ALIGNMENT = os.getenv("TRIPO_TEXTURE_ALIGNMENT", "original_image")
     TRIPO_DEFAULT_GEOMETRY_QUALITY = os.getenv("TRIPO_GEOMETRY_QUALITY", "detailed")
     # Refine 階段預設參數 (image_to_model 結果再精修)
