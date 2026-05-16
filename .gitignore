@@ -47,3 +47,5 @@ portfolio/08_demos/**/*.heic
 
 # v2 失敗樣本自動歸檔（不上 git）
 tests/fail_samples/
+
+minio_data/
