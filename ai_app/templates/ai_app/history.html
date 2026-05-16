@@ -93,6 +93,19 @@
             border-color: transparent; color: white;
         }
 
+        /* Make buttons visually consistent and remove default focus outline */
+        .filter-button:focus {
+            outline: none;
+            box-shadow: 0 10px 24px rgba(15, 23, 42, 0.06);
+            border-color: rgba(37, 99, 235, 0.12);
+        }
+
+        /* Ensure non-active focused buttons keep the same filled/white appearance as others */
+        .filter-button:not(.active):focus {
+            background: white;
+            color: var(--text);
+        }
+
         .sidebar-card {
             background: linear-gradient(180deg, #f8fbff 0%, #eef4ff 100%);
             border: 1px solid rgba(59, 130, 246, 0.14); border-radius: 18px; padding: 16px;
@@ -246,22 +259,6 @@
         </aside>
 
         <main class="content">
-            <header class="hero">
-                <!-- left hero header removed -->
-
-                <div class="hero-stats">
-                    <div>
-                        <span>顯示數量</span>
-                        <strong id="result-count">0</strong>
-                    </div>
-                    <div>
-                        <span>成功率</span>
-                        <strong>95%</strong>
-                    </div>
-                </div>
-            </header>
-
-            <!-- card-toolbar pills removed -->
 
             <section id="history-grid" class="history-grid" aria-live="polite"></section>
 
@@ -355,8 +352,8 @@
             function renderCards() {
                 const records = recordsData;
                 historyGrid.innerHTML = '';
-                resultCount.textContent = String(records.length);
-                currentFilterLabel.textContent = operationLabels[activeFilter] || '全部歷史';
+                if (resultCount) resultCount.textContent = String(records.length);
+                if (currentFilterLabel) currentFilterLabel.textContent = operationLabels[activeFilter] || '全部歷史';
                 emptyState.classList.toggle('hidden', records.length !== 0);
 
                 records.forEach((record) => {
