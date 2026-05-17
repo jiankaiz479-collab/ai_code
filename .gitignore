@@ -19,6 +19,10 @@ media/
 .idea/
 .DS_Store
 
+# 6. 忽略 MinIO 本地儲存資料夾
+minio_data/
+mino/
+
 
 
 # 讓 Git 忽略虛擬環境
