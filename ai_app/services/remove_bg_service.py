@@ -15,6 +15,10 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import Optional
+from django.utils import timezone
+from django.conf import settings
+from ai_app.models import HistoryRecord
+from .storage_service import StorageService
 
 from PIL import Image
 
@@ -32,6 +36,7 @@ class RemoveBgServiceResult:
     失敗時：ok=False / code="1xxx" / error_detail / diagnosis
     """
     image: Optional[Image.Image] = None
+    extracted_items_data: dict = field(default_factory=dict)
     style_analysis: Optional[dict] = None
     file_name: str = ""
     file_path: str = ""
@@ -51,6 +56,7 @@ class RemoveBgService:
     def process(self, pil_image: Image.Image) -> RemoveBgServiceResult:
         result = RemoveBgServiceResult()
         t_start = time.time()
+        start_ts = timezone.now()
 
         try:
             pipeline = get_remove_bg_pipeline(self.processor)
@@ -76,9 +82,18 @@ class RemoveBgService:
                 return result
 
             # 落地
+            # 檢查是否有切出多個部位 (robust_v3)
+            if hasattr(bg_result, "extracted_items") and bg_result.extracted_items:
+                for part_name, part_img in bg_result.extracted_items.items():
+                    p_name, p_path = self.processor.get_unique_filename(prefix=part_name, ext="png")
+                    part_img.save(p_path, "PNG")
+                    result.extracted_items_data[part_name] = {"file_name": p_name, "file_path": p_path}
+
+            # 處理主圖 (可能是單件，也可能是從 extracted_items fall_back 出來的上衣)
             output_img = bg_result.image
             file_name, file_path = self.processor.get_unique_filename(prefix="processed", ext="png")
-            output_img.save(file_path, "PNG")
+            if output_img:
+                output_img.save(file_path, "PNG")
 
             result.image = output_img
             result.style_analysis = style
@@ -91,6 +106,27 @@ class RemoveBgService:
             logger.exception(f"💥 RemoveBgService 失敗: {str(e)}")
             result.code = "1500"
             result.error_detail = f"系統發生非預期錯誤: {str(e)}"
+
+        end_ts = timezone.now()
+        exec_time_ms = int((time.time() - t_start) * 1000)
+
+        # 寫入歷史紀錄 (不阻斷主流程)
+        try:
+            storage = StorageService()
+            obj_key, thumb_key = storage.upload_image(result.image, prefix="remove_bg") if result.image else (None, None)
+            HistoryRecord.objects.create(
+                operation="remove_bg",
+                status="success" if result.ok else "failed",
+                bucket=getattr(settings, 'MINIO_BUCKET_HISTORY', 'history-images'),
+                object_key=obj_key,
+                thumb_key=thumb_key,
+                response_json={"code": result.code, "data": result.style_analysis} if result.ok else {"code": result.code, "error": result.error_detail},
+                start_ts=start_ts,
+                end_ts=end_ts,
+                exec_time_ms=exec_time_ms
+            )
+        except Exception as e:
+            logger.error(f"寫入 HistoryRecord 失敗: {e}")
 
         result.timings["total"] = time.time() - t_start
         return result

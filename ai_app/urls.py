@@ -5,6 +5,8 @@ from .views import (
     ReconstructView,
     Reconstruct_3D,
     TryOn3DOutfitView,
+    HistoryPageView,
+    HistoryApiView,
 )
 
 urlpatterns = [
@@ -15,4 +17,8 @@ urlpatterns = [
     path('virtual_try_on/fitting/modules', ReconstructView.as_view(), name='ReconstructView'),
     # 一條龍：2D 試穿 → 3D 重建
     path('virtual_try_on/fitting/tryon_3d_outfit', TryOn3DOutfitView.as_view(), name='tryon_3d_outfit'),
+
+    # 前端頁面
+    path('history/', HistoryPageView.as_view(), name='history_page'),
+    path('api/history/', HistoryApiView.as_view(), name='api_history'),
 ]

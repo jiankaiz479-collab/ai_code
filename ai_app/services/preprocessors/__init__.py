@@ -1,14 +1,16 @@
-"""去背前處理器：Strategy Pattern 實作。
+import os
 
-抽象合約定義在 ai_app/services/interfaces.py（RemoveBgPipeline / RemoveBgResult）。
-這個 package 只放具體實作 + 工廠。
-
-用法：
-    from ai_app.services.preprocessors import get_remove_bg_pipeline
-    pipeline = get_remove_bg_pipeline(processor)
-    result = pipeline.process(pil_img)
-"""
-
-from .factory import get_remove_bg_pipeline
-
-__all__ = ["get_remove_bg_pipeline"]
+def get_remove_bg_pipeline(processor):
+    """
+    去背策略工廠：讀取 .env 的 REMOVE_BG_VERSION 動態決定去背實作。
+    """
+    version = os.getenv("REMOVE_BG_VERSION", "legacy")
+    if version == "robust":
+        from .robust import RobustRemoveBg
+        return RobustRemoveBg(processor)
+    elif version == "robust_v3":
+        from .v3_router import V3RouterRemoveBg
+        return V3RouterRemoveBg(processor)
+    else:
+        from .legacy import LegacyRemoveBg
+        return LegacyRemoveBg(processor)

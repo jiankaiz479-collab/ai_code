@@ -25,3 +25,11 @@ requests==2.31.0
 # HEIC/HEIF 支援 (iPhone 預設 "高效率" 格式)
 pillow-heif>=0.16.0
 
+# --- Human Parsing (SCHP) 支援 ---
+onnxruntime==1.17.1
+
+# --- Human Parsing (SCHP) 支援 ---
+onnxruntime==1.17.1
+
+# --- MinIO S3 客戶端 ---
+minio==7.2.5

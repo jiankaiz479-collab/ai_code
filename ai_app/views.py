@@ -3,6 +3,7 @@ import logging
 import time
 
 from PIL import Image
+from django.shortcuts import render
 from django.http import JsonResponse, HttpResponse
 from django.views import View
 from django.utils.decorators import method_decorator
@@ -14,6 +15,8 @@ from .services.remove_bg_service import RemoveBgService
 from .services.try_on_service import TryOnService
 from .services.reconstruct_3d_service import Reconstruct3DService, Reconstruct3DOptions
 from .services.try_on_3d_service import TryOn3DService
+from .models import HistoryRecord
+from django.conf import settings
 
 # ==========================================
 # 1. 去背功能 (Remove Background)
@@ -101,6 +104,11 @@ class RemoveBgView(View):
                 "style_analysis": result.style_analysis,
             }
         }
+        
+        # 如果有多部位拆解，將檔名加入 JSON 讓前端知道
+        if result.extracted_items_data:
+            analysis_data["data"]["extracted_items"] = {k: v["file_name"] for k, v in result.extracted_items_data.items()}
+            
         json_pretty = json.dumps(analysis_data, indent=4, ensure_ascii=False)
         boundary = 'bg_removal_boundary'
         body = [
@@ -109,7 +117,17 @@ class RemoveBgView(View):
         ]
         with open(result.file_path, 'rb') as f:
             body.append(f.read())
-        body.append(f'\r\n--{boundary}--\r\n'.encode('utf-8'))
+        body.append(b'\r\n')
+        
+        # 附加多部位的實體圖片檔案 (例如 name="upper" / name="lower")
+        if result.extracted_items_data:
+            for part_name, part_data in result.extracted_items_data.items():
+                body.append(f'--{boundary}\r\nContent-Disposition: form-data; name="{part_name}"; filename="{part_data["file_name"]}"\r\nContent-Type: image/png\r\n\r\n'.encode('utf-8'))
+                with open(part_data["file_path"], 'rb') as f:
+                    body.append(f.read())
+                body.append(b'\r\n')
+                
+        body.append(f'--{boundary}--\r\n'.encode('utf-8'))
 
         logger.info(f"🎉 [G2] 去背完成！總耗時: {time.time()-start_time:.2f}s")
         return HttpResponse(b''.join(body), content_type=f'multipart/form-data; boundary={boundary}')
@@ -395,6 +413,56 @@ class Reconstruct_3D(View):
         body.append(b'\r\n')
         body.append(f'--{boundary}--\r\n'.encode('utf-8'))
         return HttpResponse(b''.join(body), content_type=f'multipart/mixed; boundary={boundary}')
+
+
+# ==========================================
+# 6. 歷史紀錄查詢介面 (Frontend View)
+# ==========================================
+class HistoryPageView(View):
+    """
+    回傳歷史紀錄檢視的前端網頁 (目前為 Mock 資料展示)
+    """
+    def get(self, request, *args, **kwargs):
+        return render(request, 'ai_app/history.html')
+
+
+# ==========================================
+# 7. 歷史紀錄 API (Fetch History)
+# ==========================================
+class HistoryApiView(View):
+    def get(self, request, *args, **kwargs):
+        operation = request.GET.get('operation', 'all')
+        qs = HistoryRecord.objects.all()
+        if operation != 'all':
+            qs = qs.filter(operation=operation)
+            
+        data = []
+        for record in qs[:50]:  # 暫時回傳最新 50 筆
+            data.append({
+                "id": record.id,
+                "filter": record.operation,
+                "type": {"remove_bg": "去背", "tryon_2d": "2D", "reconstruct_3d": "3D"}.get(record.operation, record.operation),
+                "status": record.status,
+                "title": f"任務 #{record.id}",
+                "subtitle": "執行完成" if record.status == 'success' else "執行失敗",
+                "createdAt": record.created_at.strftime('%Y-%m-%d %H:%M'),
+                "start": record.start_ts.strftime('%Y-%m-%d %H:%M:%S') if record.start_ts else "",
+                "end": record.end_ts.strftime('%Y-%m-%d %H:%M:%S') if record.end_ts else "",
+                "duration": f"{record.exec_time_ms / 1000.0:.1f} s",
+                "result": "輸出成功" if record.status == 'success' else "發生錯誤",
+                "image": self._get_url(record.bucket, record.thumb_key),
+                "largeImage": self._get_url(record.bucket, record.object_key),
+                "response": record.response_json,
+            })
+        return JsonResponse({"results": data})
+        
+    def _get_url(self, bucket, key):
+        if not key:
+            return "https://via.placeholder.com/400?text=No+Image"
+        endpoint = getattr(settings, 'MINIO_EXTERNAL_ENDPOINT', 'localhost:9002')
+        if not endpoint.startswith('http'):
+            endpoint = f"http://{endpoint}"
+        return f"{endpoint}/{bucket}/{key}"
 
 
 # ==========================================

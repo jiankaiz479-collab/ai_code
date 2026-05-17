@@ -13,6 +13,10 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import List, Optional, Union
+from django.utils import timezone
+from django.conf import settings
+from ai_app.models import HistoryRecord
+from .storage_service import StorageService
 
 from PIL import Image
 
@@ -60,6 +64,7 @@ class TryOnService:
         """
         result = TryOnResult()
         t_start = time.time()
+        start_ts = timezone.now()
 
         try:
             # 並行：衣物分析 + 模特圖預處理
@@ -128,6 +133,27 @@ class TryOnService:
             result.error_detail = f"系統發生非預期錯誤: {str(e)}"
 
         result.timings["total"] = time.time() - t_start
+        end_ts = timezone.now()
+        exec_time_ms = int((time.time() - t_start) * 1000)
+
+        # 寫入歷史紀錄
+        try:
+            storage = StorageService()
+            obj_key, thumb_key = storage.upload_image(result.image, prefix="tryon_2d") if result.image else (None, None)
+            HistoryRecord.objects.create(
+                operation="tryon_2d",
+                status="success" if result.ok else "failed",
+                bucket=getattr(settings, 'MINIO_BUCKET_HISTORY', 'history-images'),
+                object_key=obj_key,
+                thumb_key=thumb_key,
+                response_json={"code": result.code, "data": {"style_name": result.style_name}} if result.ok else {"code": result.code, "error": result.error_detail},
+                start_ts=start_ts,
+                end_ts=end_ts,
+                exec_time_ms=exec_time_ms
+            )
+        except Exception as e:
+            logger.error(f"寫入 HistoryRecord 失敗: {e}")
+
         return result
 
     @staticmethod

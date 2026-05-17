@@ -60,6 +60,49 @@ class AIProcessor(ImageProcessingInterface):
         save_path = os.path.join(settings.MEDIA_ROOT, filename)
         os.makedirs(settings.MEDIA_ROOT, exist_ok=True)
         return filename, save_path
+
+    def validate_input_image(self, pil_img):
+        """
+        [v2/v3] LLM Router: 驗證是否為衣物，並判斷 presentation_mode。
+        """
+        if not self.client:
+            logger.warning("Gemini Client 未初始化，跳過 LLM 預檢。")
+            return {"is_valid_garment": True, "presentation_mode": "flat_lay", "reasoning": "Fallback"}
+            
+        prompt = """
+        Analyze the uploaded image and output a JSON object.
+
+        【RULES】
+        1. "is_valid_garment" (boolean): Is the main subject of this image a piece of clothing or someone wearing clothing? (Return false if it's a laptop, poster, random object, or completely empty).
+        2. "reasoning" (string): Briefly explain why it is or isn't a valid garment in Traditional Chinese (繁體中文).
+        3. "presentation_mode" (string): If valid, how is the clothing presented? Choose exactly one from:
+           - "flat_lay" (lying flat on a bed, table, or floor)
+           - "on_hanger" (hanging on a hanger or hook, but NO human body)
+           - "worn_on_body" (a real person or mannequin is wearing it)
+           - "none" (if is_valid_garment is false)
+           
+        JSON Structure:
+        {
+          "is_valid_garment": true,
+          "reasoning": "...",
+          "presentation_mode": "flat_lay"
+        }
+        """
+        try:
+            response = self.client.models.generate_content(
+                model=self.consultant_model,
+                contents=[pil_img, prompt],
+                config=types.GenerateContentConfig(
+                    response_mime_type="application/json",
+                    temperature=0.1
+                )
+            )
+            result = json.loads(response.text)
+            logger.info(f"✅ LLM 預檢與 Router 分類成功: {result}")
+            return result
+        except Exception as e:
+            logger.warning(f"⚠️ LLM 預檢失敗: {e}。跳過預檢。")
+            return {"is_valid_garment": True, "presentation_mode": "flat_lay", "reasoning": f"Error: {e}"}
     
     # ==========================================
     # [後期開發] 語意遮罩生成 (利用 Gemini 識別陰影與高光區域)
@@ -594,7 +637,7 @@ class AIProcessor(ImageProcessingInterface):
     TRIPO_DEFAULT_TEXTURE_QUALITY = os.getenv("TRIPO_TEXTURE_QUALITY", "detailed")
     TRIPO_DEFAULT_FACE_LIMIT = int(os.getenv("TRIPO_FACE_LIMIT", "100000"))
     TRIPO_DEFAULT_PBR = os.getenv("TRIPO_PBR", "true").lower() in ("1", "true", "yes")
-    TRIPO_DEFAULT_MODEL_VERSION = os.getenv("TRIPO_MODEL_VERSION", "v3.1-20260211")
+    TRIPO_DEFAULT_MODEL_VERSION = os.getenv("TRIPO_MODEL_VERSION", "v2.5-20250123")
     TRIPO_DEFAULT_TEXTURE_ALIGNMENT = os.getenv("TRIPO_TEXTURE_ALIGNMENT", "original_image")
     TRIPO_DEFAULT_GEOMETRY_QUALITY = os.getenv("TRIPO_GEOMETRY_QUALITY", "detailed")
     # Refine 階段預設參數 (image_to_model 結果再精修)

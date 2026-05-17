@@ -15,6 +15,9 @@ import time
 import uuid
 from dataclasses import dataclass, field
 from typing import Optional
+from django.utils import timezone
+from ai_app.models import HistoryRecord
+from .storage_service import StorageService
 
 from django.conf import settings
 from PIL import Image
@@ -67,6 +70,7 @@ class Reconstruct3DService:
         options = options or Reconstruct3DOptions()
         result = Reconstruct3DResult()
         t_start = time.time()
+        start_ts = timezone.now()
 
         try:
             # Mock 模式（直接讀預設 GLB）
@@ -172,6 +176,27 @@ class Reconstruct3DService:
             result.error_detail = f"系統忙碌中，請稍後再試: {str(e)}"
 
         result.timings["total"] = time.time() - t_start
+        end_ts = timezone.now()
+        exec_time_ms = int((time.time() - t_start) * 1000)
+        
+        # 寫入歷史紀錄 (使用輸入的 2D 圖片作為預覽圖)
+        try:
+            storage = StorageService()
+            obj_key, thumb_key = storage.upload_image(pil_image, prefix="reconstruct_3d") if pil_image else (None, None)
+            HistoryRecord.objects.create(
+                operation="reconstruct_3d",
+                status="success" if result.ok else "failed",
+                bucket=getattr(settings, 'MINIO_BUCKET_HISTORY', 'history-images'),
+                object_key=obj_key,
+                thumb_key=thumb_key,
+                response_json={"code": result.code, "data": {"file_name": result.file_name}} if result.ok else {"code": result.code, "error": result.error_detail},
+                start_ts=start_ts,
+                end_ts=end_ts,
+                exec_time_ms=exec_time_ms
+            )
+        except Exception as e:
+            logger.error(f"寫入 HistoryRecord 失敗: {e}")
+
         return result
 
     def _try_mock(self):
