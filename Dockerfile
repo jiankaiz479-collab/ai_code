@@ -6,7 +6,7 @@ WORKDIR /app
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     DEBIAN_FRONTEND=noninteractive \
-    U2NET_HOME=/app/.u2net
+    U2NET_HOME=/.u2net
 
 # 2. 安裝系統套件
 # 這裡維持不變，但 Docker 只要看過這層沒變，就不會重新 apt-get
@@ -34,10 +34,17 @@ RUN mkdir -p /app/media
 # 注意：因為有 .dockerignore，所以不會拷貝到 venv 那些垃圾檔案了！
 COPY . .
 
-# 7. 智慧預載 rembg 模型
-# 我們先檢查是否已經有模型檔案，沒有才執行下載（雖然 rembg 內部也有檢查，但這樣寫更明確）
-RUN python -c "import os; from rembg import new_session; \
-    if not os.path.exists(os.environ.get('U2NET_HOME')): new_session()" || true
+# 7. 智慧預載 rembg 模型 (包含預設與人像優化版)
+# 先檢查模型是否已存在，不存在才透過 curl 下載，大幅加快容器冷啟動速度
+RUN mkdir -p ${U2NET_HOME} && \
+    if [ ! -f "${U2NET_HOME}/u2net_human_seg.onnx" ]; then \
+        echo "Downloading u2net_human_seg.onnx..." && \
+        curl -L -o ${U2NET_HOME}/u2net_human_seg.onnx https://github.com/danielgatis/rembg/releases/download/v0.0.0/u2net_human_seg.onnx; \
+    fi && \
+    if [ ! -f "${U2NET_HOME}/u2net.onnx" ]; then \
+        echo "Downloading u2net.onnx..." && \
+        curl -L -o ${U2NET_HOME}/u2net.onnx https://github.com/danielgatis/rembg/releases/download/v0.0.0/u2net.onnx; \
+    fi
 
 EXPOSE ${RUN_PORT:-8002}
 
