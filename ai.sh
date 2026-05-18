@@ -94,7 +94,6 @@ docker run -d \
 
 echo "======================================================="
 echo "🎉 全系統配置完成！"
-echo "🔗 MinIO S3 API：http://localhost:9002"
 echo "🔗 MinIO Console：http://localhost:10092 (登入: minioadmin / minioadmin)"
-echo "🔗 服務位址：http://localhost:${RUN_PORT}"
+echo "🔗 服務位址：http://localhost:${RUN_PORT}/history/"
 echo "======================================================="
