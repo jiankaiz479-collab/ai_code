@@ -408,3 +408,50 @@ AI 處理完圖片要上傳 MinIO 時，日誌狂刷：
 
 **🎓 學到的教訓**
 在團隊協作中，**預防勝於治療**。除了依賴 Docker 的網路隔離外，主動在設定層面避開常用的 Port 號，能有效降低溝通成本與未來部署時發生靈異報錯的風險。
+
+---
+
+## 🐛 Case 6: Postman 在筆電上打 `localhost:8002`，但遠端 server 連不上
+
+**📍 發生情境**
+我以前在筆電上用 Postman 打 `http://localhost:8002/virtual_try_on/clothes/remove_bg` 可
+以成功，但把服務搬到 server / 容器後，Postman 卻開始連不上。
+
+**🔍 排查與驗證過程**
+1. **先確認 API 本身沒壞**：在 server 內部用 `curl http://127.0.0.1:8002/virtual_tr
+y_on/clothes/remove_bg` 測試，回 `200 OK`，而且 multipart 回應內容正常。
+2. **再確認 Docker port 有沒有開**：`docker inspect ai-container` 顯示 `8002/tcp` 確
+實映射到 `0.0.0.0:8002`。
+3. **再排除主機防火牆**：`iptables` / `ufw` 沒有直接擋住 `8002`。
+4. **最後確認真正的問題是網路路徑**：從外部機器打 `http://150.107.58.47:8002/..` 會
+ `Connection refused`，證明不是 API 壞掉，而是外部沒有直接打進去。
+5. **建立 SSH tunnel 驗證**：我在筆電上用 `ssh -L 8003:127.0.0.1:8002 mitlab@140.1
+18.122.151 -p 40000` 建立轉發後，Postman 改打 `http://localhost:8003/...` 就成功了。
+
+**💡 根本原因**
+- `localhost` 永遠只代表「當下這台電腦自己」
+- 我以前能打通，是因為 Postman 所在位置和服務在同一台機器，或中間已經有 SSH t
+unnel / port forwarding
+- 搬到 server 後沒有轉發，筆電上的 `localhost:8002` 就不再指向遠端服務
+
+**🛠️ 解決方案**
+1. **如果 Postman 在 server 本機**：直接打 `http://127.0.0.1:8002/virtual_try_on/clot
+hes/remove_bg`
+2. **如果 Postman 在筆電**：先建立 SSH tunnel，將遠端 `8002` 轉到本機，例如 `8003`
+3. **實際可用的 Postman URL**：`http://localhost:8003/virtual_try_on/clothes/remove_bg`
+
+**🎓 學到的教訓**
+1. 測 API 前一定要先分清楚：是 **API 本身問題** 還是 **網路路徑問題**。
+2. `localhost` 不是遠端主機，只有在「同一台機器」或「有做 port forward」時才會通。
+3. 遇到遠端測試失敗時，先用 `curl` 在 server 內部驗證，再往外查 network path，會
+比直接懷疑程式碼有效得多。
+
+**🗣️ 面試時可以怎麼講？**
+
+> 「我曾經遇到一個很典型的遠端測試問題：我在筆電上用 Postman 打 `localhost:8002` 可以通，但服務搬到 server 後卻失敗。
+>
+> 我先在 server 內部用 `curl` 驗證 API 本身，確認 `remove_bg` 其實是正常回 `200` 的；接著檢查 Docker port mapping 和主機防火牆，也都沒有問題。最後才發現，問題出在網路路徑：我以前其實是透過 SSH tunnel 把遠端服務轉到本機，所以 `localhost` 才會有效。
+>
+> 找到根因後，我改用 `ssh -L 8003:127.0.0.1:8002 ...` 建立 port forwarding，讓筆電上的 Postman 打 `http://localhost:8003/...`，就能穩定連到遠端容器。這次經驗讓我更清楚地分辨：API 錯誤、容器映射、以及網路轉發是三件不同的事。」
+
+---
