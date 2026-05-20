@@ -433,7 +433,8 @@ class HistoryPageView(View):
 class HistoryApiView(View):
     def get(self, request, *args, **kwargs):
         operation = request.GET.get('operation', 'all')
-        qs = HistoryRecord.objects.all()
+        # 加上 order_by('-created_at')，確保前端自動更新時，最新完成的任務會排在最前面
+        qs = HistoryRecord.objects.all().order_by('-created_at')
         if operation != 'all':
             qs = qs.filter(operation=operation)
             

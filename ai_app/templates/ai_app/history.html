@@ -400,6 +400,7 @@
             modal.addEventListener('click', (event) => { if (event.target.matches('[data-close-modal]')) { closeModal(); } });
             document.addEventListener('keydown', (event) => { if (event.key === 'Escape' && !modal.classList.contains('hidden')) { closeModal(); } });
             fetchCards();
+
         })();
     </script>
 </body>

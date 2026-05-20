@@ -30,7 +30,7 @@
     <div class="box">
         <h3>2. 模擬 API 呼叫 (給劉本澤看的)</h3>
         <p>這會模擬 Postman 發送請求到 <code>/api/remove_bg</code></p>
-        <form action="/api/remove_bg" method="post" enctype="multipart/form-data" target="_blank">
+        <form action="/api/remove_bg" method="post" enctype="multipart/form-data" class="ajax-form">
             <input type="file" name="clothes_image" required>
             <button type="submit" class="btn" style="background: #28a745;">測試 remove_bg API</button>
         </form>
@@ -39,11 +39,47 @@
     <div class="box">
         <h3>3. 模擬 API 呼叫 (試穿)</h3>
         <p>這會模擬 Postman 發送請求到 <code>/api/try_combine</code></p>
-        <form action="/api/try_combine" method="post" enctype="multipart/form-data" target="_blank">
+        <form action="/api/try_combine" method="post" enctype="multipart/form-data" class="ajax-form">
             <label>Model:</label> <input type="file" name="model_image" required><br><br>
             <label>Cloth:</label> <input type="file" name="clothes_image" required><br><br>
             <button type="submit" class="btn" style="background: #6f42c1;">測試 try_combine API</button>
         </form>
     </div>
+
+    <script>
+        // 攔截所有標記為 ajax-form 的表單
+        document.querySelectorAll('.ajax-form').forEach(form => {
+            form.addEventListener('submit', async (e) => {
+                e.preventDefault(); // 阻止瀏覽器預設的跳轉與下載行為
+                
+                const btn = form.querySelector('button');
+                const originalText = btn.textContent;
+                btn.textContent = '⏳ AI 處理中，請稍候...';
+                btn.disabled = true;
+
+                try {
+                    // 在背景發送請求給後端 API
+                    const response = await fetch(form.action, {
+                        method: form.method,
+                        body: new FormData(form)
+                    });
+
+                    if (response.ok) {
+                        // API 執行成功後，前端主動「跑一次」跳轉到歷史紀錄頁面！
+                        // ⚠️ 這裡請填入您 history.html 對應的實際網址 (例如 /history/ 或 /virtual_try_on/history/)
+                        window.location.href = '/history/'; 
+                    } else {
+                        alert('處理失敗，請看終端機的錯誤訊息。');
+                    }
+                } catch (err) {
+                    console.error(err);
+                    alert('網路請求發生錯誤！');
+                } finally {
+                    btn.textContent = originalText;
+                    btn.disabled = false;
+                }
+            });
+        });
+    </script>
 </body>
 </html>
