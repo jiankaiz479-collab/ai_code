@@ -35,7 +35,6 @@
 sequenceDiagram
     autonumber
     participant Client as 使用者 / 前端介面
-    participant View as 2D 試穿 API 入口 (TryCombineView)
     participant Service as 2D 試穿流程服務 (TryOnService)
     participant Proc as AIProcessor
     participant Analyzer as 衣物分析模型 (consultant_model)
@@ -57,19 +56,11 @@ sequenceDiagram
     end
 
     Service->>Proc: 4. virtual_try_on(model_image, garments_ctx, data)
-    Proc->>Generator: 5. 依主體圖與衣物資訊進行合成
-    Generator-->>Proc: 6. 回傳合成後的結果圖片
-    Proc->>Proc: 7. 去背與版面修整（remove_background + compose_square_portrait）
-    Proc-->>Service: 8. 回傳最終輸出影像
 
     Service->>Service: 9. 產生檔名並將 PNG 儲存至本機
     Service->>Proc: 10. analyze_clothing_style(final_image, mode="outfit")
     Service->>Storage: 11. 上傳成果並建立歷史紀錄
     Service-->>View: TryOnResult(ok=True, image, file_name, file_path, style_name)
-
-    View->>View: 12. 組裝 multipart/mixed 回應（JSON + PNG）
-    View-->>Client: HTTP 200
-```
 
 ---
 
@@ -80,8 +71,6 @@ sequenceDiagram
 ai_app/                # Django App：views, models, templates, static
     └─ services/         # AI Service Layer（processing, interfaces, remove_bg, try_on, try_on_3d, reconstruct_3d, storage, preprocessors）
 cv_testing_site/       # Django project settings (settings.py, urls.py, asgi/wsgi)
-models/                # 本地 ML 模型 (.onnx)
-history/               # 專案文件（架構、設計、bug、roadmap）
 Dockerfile             # 容器化建置
 requirements.txt       # 依賴套件
 manage.py              # Django 管理腳本
@@ -95,9 +84,6 @@ manage.py              # Django 管理腳本
 完整目錄結構（技術附錄，供報告附件或工程閱讀）：
 
 ```text
-├── ai_app/                          # Django App 核心業務模組
-│   ├── views.py                     # 第 2 層：View 入口 (HTTP 請求與路由)
-│   ├── models.py                    # 資料庫模型 (包含 HistoryRecord)
 │   ├── urls.py                      # API 端點註冊
 │   ├── templates/                   # 前端 HTML 模板 (包含歷史紀錄 UI 等)
 │   ├── static/                      # 前端靜態資源 (CSS, JS)
@@ -111,14 +97,11 @@ manage.py              # Django 管理腳本
 │       ├── preprocessors/           # 前置處理策略集合（Strategy Pattern）
 │       │   ├── base.py              # 前置處理抽象介面
 │       │   ├── legacy_remove_bg.py  # 舊版去背邏輯
-│       │   └── robust_remove_bg.py  # 新版去背邏輯 (HEIC/EXIF/Resize)
-│       ├── validators/              # 驗證與防呆層
 │       │   └── ...                  # 各種驗證器
 │       ├── 3d_engines/              # 3D 引擎集合
 │       │   └── ...                  # 各種 3D 模型/引擎實作
 │       └── utils/                   # 共用工具函式
 │           ├── image_io.py          # 圖片共用基礎建設 (HEIC/EXIF/Resize)
-│           └── ...                  # 其他共用工具
 ├── cv_testing_site/                 # Django Project 設定目錄
 │   ├── settings.py                  # 系統設定 (DB, MinIO, 環境變數讀取)
 │   ├── urls.py                      # 全域路由
@@ -130,14 +113,8 @@ manage.py              # Django 管理腳本
 ├── ai.sh                            # 系統一鍵啟動與 Docker 管理腳本
 ├── .env                             # 環境變數 (API Keys, 內部埠口, 測試開關)
 └── .env.example                     # 環境變數模板
-```
----
-
 ## 分層設計（為什麼這樣切？）
 
-### 第 1 層：URL 路由 (`urls.py`)
-- 只負責 path → view 對應
-- **不放邏輯**
 - **設計理由**：未來換 web framework（例如改 FastAPI）只要重寫這層
 
 ### 第 2 層：View 入口 (`views.py`)
@@ -146,8 +123,6 @@ manage.py              # Django 管理腳本
 - **不直接 call 第三方 API**
 - **設計理由**：View 應該對使用者體驗負責（錯誤訊息、HTTP 狀態），不該知道 Gemini 怎麼用
 
-### 第 3 層：AI Services (`services/processing.py`)
-- 集中所有 AI 呼叫邏輯
 - 每個 AI service 一組方法群（`tripo_*`, `gemini_*`, `remove_background`）
 ### 第 3 層：AI Services (`services/` 目錄)
 - 集中所有業務邏輯（拆分為去背、2D試穿、3D重建等 `_service.py`），並透過 `AIProcessor` 統一呼叫底層 AI 工具
@@ -157,16 +132,12 @@ manage.py              # Django 管理腳本
 
 ### 第 4 層：抽象介面 (`services/interfaces.py`)
 - 定義 `ImageProcessingInterface` 抽象類別
-- **設計理由**：未來要做 unit test 時可以 mock，也方便換掉某個 AI 服務（例如 Gemini → Claude）
-
 ---
 
 ## API 端點設計
 
 | Endpoint | 用途 | 對應業務碼前綴 |
 |---|---|---|
-| `/clothes/remove_bg` | 衣服去背 + 風格分析 | `1xxx` |
-| `/fitting/generate` | 2D 虛擬試穿合成 | `2xxx` |
 | `/fitting/modules` | 人像標準化（3D 預處理） | `3xxx` |
 | `/fitting/tryon_3d_physics` | 3D 重建 | `4xxx` |
 
