@@ -6,6 +6,7 @@ from PIL import Image
 from django.shortcuts import render
 from django.http import JsonResponse, HttpResponse
 from django.views import View
+from django.utils import timezone
 from django.utils.decorators import method_decorator
 from django.views.decorators.csrf import csrf_exempt
 
@@ -445,23 +446,32 @@ class HistoryApiView(View):
                 "status": record.status,
                 "title": f"任務 #{record.id}",
                 "subtitle": "執行完成" if record.status == 'success' else "執行失敗",
-                "createdAt": record.created_at.strftime('%Y-%m-%d %H:%M'),
-                "start": record.start_ts.strftime('%Y-%m-%d %H:%M:%S') if record.start_ts else "",
-                "end": record.end_ts.strftime('%Y-%m-%d %H:%M:%S') if record.end_ts else "",
+                "createdAt": timezone.localtime(record.created_at).strftime('%Y-%m-%d %H:%M') if record.created_at else "",
+                "start": timezone.localtime(record.start_ts).strftime('%Y-%m-%d %H:%M:%S') if record.start_ts else "",
+                "end": timezone.localtime(record.end_ts).strftime('%Y-%m-%d %H:%M:%S') if record.end_ts else "",
                 "duration": f"{record.exec_time_ms / 1000.0:.1f} s",
                 "result": "輸出成功" if record.status == 'success' else "發生錯誤",
-                "image": self._get_url(record.bucket, record.thumb_key),
-                "largeImage": self._get_url(record.bucket, record.object_key),
+                "image": self._get_url(request, record.bucket, record.thumb_key),
+                "largeImage": self._get_url(request, record.bucket, record.object_key),
                 "response": record.response_json,
             })
         return JsonResponse({"results": data})
         
-    def _get_url(self, bucket, key):
+    def _get_url(self, request, bucket, key):
         if not key:
             return "https://via.placeholder.com/400?text=No+Image"
         endpoint = getattr(settings, 'MINIO_EXTERNAL_ENDPOINT', 'localhost:9002')
+        
+        # 自動判斷：如果設定檔寫死 localhost，但用戶是從遠端 IP 訪問，則動態替換為該 IP
+        client_host = request.get_host().split(':')[0]
+        if 'localhost' in endpoint and client_host not in ('localhost', '127.0.0.1'):
+            endpoint = endpoint.replace('localhost', client_host)
+            
         if not endpoint.startswith('http'):
             endpoint = f"http://{endpoint}"
+            
+        # 避免網址出現雙斜線 (如 my-bucket//test.png)
+        key = key.lstrip('/')
         return f"{endpoint}/{bucket}/{key}"
 
 
