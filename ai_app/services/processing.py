@@ -417,6 +417,43 @@ class AIProcessor(ImageProcessingInterface):
             m_info = user_data.get('model_info', {})
             u_h = m_info.get('user_height', 170.0)
             u_w = m_info.get('user_waistline', 80.0)
+            # Structured model info for prompt
+            model_info_text = json.dumps({
+                'user_height': m_info.get('user_height'),
+                'user_weight': m_info.get('user_weight'),
+                'user_shoulder_width': m_info.get('user_shoulder_width'),
+                'user_arm_length': m_info.get('user_arm_length'),
+                'user_waistline': m_info.get('user_waistline'),
+                'user_leg_length': m_info.get('user_leg_length'),
+            }, ensure_ascii=False)
+            # Garment summary text
+            garment_specs = user_data.get('garments', [])
+            garment_specs_text = "\n".join(
+                f"Item {i+1} ({g.get('clothes_category','unknown')}): {json.dumps(g.get('garment_info', {}), ensure_ascii=False)}"
+                for i, g in enumerate(garment_specs)
+            ) or "- None provided"
+            garments_info_text = json.dumps(garment_specs, ensure_ascii=False)
+
+            # Build structured blocks for model and garments to inject into the prompt
+            structured_model_block = (
+                f"### MODEL_INFO:\n"
+                f"  height_cm: {m_info.get('user_height', '')}\n"
+                f"  weight_kg: {m_info.get('user_weight', '')}\n"
+                f"  shoulder_width_cm: {m_info.get('user_shoulder_width', '')}\n"
+                f"  arm_length_cm: {m_info.get('user_arm_length', '')}\n"
+                f"  waistline_cm: {m_info.get('user_waistline', '')}\n"
+                f"  leg_length_cm: {m_info.get('user_leg_length', '')}\n"
+            )
+
+            if garment_specs:
+                structured_garments_lines = []
+                for idx, g in enumerate(garment_specs):
+                    info = g.get('garment_info', {}) or {}
+                    info_kv = ", ".join([f"{k}:{v}" for k, v in info.items()]) if info else ""
+                    structured_garments_lines.append(f"Item {idx+1}: category={g.get('clothes_category','unknown')}\n  {info_kv}")
+                structured_garments_block = "### GARMENTS:\n" + "\n".join(structured_garments_lines)
+            else:
+                structured_garments_block = "### GARMENTS: - None provided"
 
             # --- [1. 構建 Final Prompt: 強調邊緣對比與單一背景，利於後續去背] ---
             final_prompt = (
@@ -442,6 +479,10 @@ class AIProcessor(ImageProcessingInterface):
                 f"1. VISUAL STYLE: A photorealistic, high-resolution full-body PHOTOGRAPH. Ensure the composite garments look naturally and seamlessly integrated with the human subject. "
                 # 保持不变，純白底
                 f"2. BACKGROUND: SOLID PURE WHITE (#FFFFFF). No shadows on the floor, no gradient, no textures. "
+
+                  # --- Inject structured model + garment info ---
+                  f"{structured_model_block}"
+                  f"{structured_garments_block}"
                 
                 # ⚠️ 修改 3：針對 3D 生成最重要的修改！ ⚠️
                 # PIFuHD 是靠皺褶陰影來判斷深度。原本的 'Flat lighting' 會消滅皺褶，導致 3D 變扁。

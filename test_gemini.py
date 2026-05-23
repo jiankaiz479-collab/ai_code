@@ -1,6 +1,31 @@
 import os
+import sys
 import time
-from dotenv import load_dotenv
+from pathlib import Path
+
+
+def _add_venv_site_packages() -> None:
+    repo_root = Path(__file__).resolve().parent
+    venv_site_packages = repo_root / "venv" / "lib"
+    if not venv_site_packages.exists():
+        return
+
+    for candidate in venv_site_packages.glob("python*/site-packages"):
+        candidate_str = str(candidate)
+        if candidate_str not in sys.path:
+            sys.path.insert(0, candidate_str)
+        return
+
+
+_add_venv_site_packages()
+
+try:
+    from dotenv import load_dotenv
+except ModuleNotFoundError:
+    def load_dotenv(*args, **kwargs):
+        """Fallback: keep script runnable even when python-dotenv is unavailable."""
+        return False
+
 from google import genai
 
 # 載入環境變數

@@ -3,6 +3,7 @@ import logging
 import time
 
 from PIL import Image
+from minio import Minio
 from django.shortcuts import render
 from django.http import JsonResponse, HttpResponse
 from django.views import View
@@ -461,19 +462,42 @@ class HistoryApiView(View):
     def _get_url(self, request, bucket, key):
         if not key:
             return "https://via.placeholder.com/400?text=No+Image"
-        endpoint = getattr(settings, 'MINIO_EXTERNAL_ENDPOINT', 'localhost:9002')
-        
-        # 自動判斷：如果設定檔寫死 localhost，但用戶是從遠端 IP 訪問，則動態替換為該 IP
-        client_host = request.get_host().split(':')[0]
-        if 'localhost' in endpoint and client_host not in ('localhost', '127.0.0.1'):
-            endpoint = endpoint.replace('localhost', client_host)
-            
-        if not endpoint.startswith('http'):
-            endpoint = f"http://{endpoint}"
-            
-        # 避免網址出現雙斜線 (如 my-bucket//test.png)
+        # Return a proxied URL served by this Django app so browser doesn't need
+        # direct access to MinIO. The actual object is served by HistoryMediaProxyView.
         key = key.lstrip('/')
-        return f"{endpoint}/{bucket}/{key}"
+        return request.build_absolute_uri(f"/api/history/media/{bucket}/{key}/")
+
+
+class HistoryMediaProxyView(View):
+    """Proxy image requests from browser to MinIO so frontend can load images
+    even when MinIO is not directly reachable from the browser host.
+    """
+    def get(self, request, bucket, key, *args, **kwargs):
+        endpoint = getattr(settings, 'MINIO_ENDPOINT', 'ai-minio:9002')
+        # If endpoint refers to localhost in a container, use internal host
+        if 'localhost' in endpoint or '127.0.0.1' in endpoint:
+            endpoint = 'ai-minio:9002'
+        endpoint = endpoint.replace('http://', '').replace('https://', '')
+        access_key = getattr(settings, 'MINIO_ACCESS_KEY', 'minioadmin')
+        secret_key = getattr(settings, 'MINIO_SECRET_KEY', 'minioadmin')
+        secure = getattr(settings, 'MINIO_SECURE', False)
+
+        try:
+            client = Minio(endpoint, access_key=access_key, secret_key=secret_key, secure=secure)
+            obj = client.get_object(bucket, key)
+            data = obj.read()
+            # Determine content type header if available; default to image/png
+            content_type = getattr(obj, 'content_type', None) or 'image/png'
+            obj.close()
+            obj.release_conn()
+            return HttpResponse(data, content_type=content_type)
+        except Exception as e:
+            logger.warning(f"❌ [HistoryMediaProxy] failed to fetch {bucket}/{key}: {e}")
+            return JsonResponse({
+                'code': 404,
+                'message': 'IMAGE_NOT_FOUND',
+                'debug_info': {'error_detail': str(e)}
+            }, status=404)
 
 
 # ==========================================

@@ -7,6 +7,7 @@ from .views import (
     TryOn3DOutfitView,
     HistoryPageView,
     HistoryApiView,
+    HistoryMediaProxyView,
 )
 
 urlpatterns = [
@@ -21,4 +22,5 @@ urlpatterns = [
     # 前端頁面
     path('history/', HistoryPageView.as_view(), name='history_page'),
     path('api/history/', HistoryApiView.as_view(), name='api_history'),
+    path('api/history/media/<str:bucket>/<path:key>/', HistoryMediaProxyView.as_view(), name='history_media_proxy'),
 ]
