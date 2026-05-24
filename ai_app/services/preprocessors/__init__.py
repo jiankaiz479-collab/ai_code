@@ -10,10 +10,10 @@ def get_remove_bg_pipeline(processor):
     if version == "robust":
         from .robust import RobustRemoveBg
         return RobustRemoveBg(processor)
-    if version == "robust_v2":
+    elif version == "robust_v2":
         from .robust_v2 import RobustV2RemoveBg
         return RobustV2RemoveBg(processor)
-    if version == "robust_v3":
+    elif version == "robust_v3":
         from .v3_router import V3RouterRemoveBg
         return V3RouterRemoveBg(processor)
 
