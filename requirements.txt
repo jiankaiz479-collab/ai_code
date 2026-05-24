@@ -1,3 +1,6 @@
+opencv-python>=4.5.5
+numpy>=1.22
+Pillow>=9.0
 # 固定在 5.0.x 系列，確保 Django 語法不會因為跳到 6.0 而改變
 Django==5.0.3
 # 環境變數管理

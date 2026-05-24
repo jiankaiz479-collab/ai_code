@@ -1,4 +1,4 @@
-FROM python:3.10-slim
+FROM python:3.11-slim
 
 WORKDIR /app
 
@@ -12,7 +12,7 @@ ENV PYTHONUNBUFFERED=1 \
 # 這裡維持不變，但 Docker 只要看過這層沒變，就不會重新 apt-get
 RUN apt-get update && apt-get install -y --no-install-recommends \
     git build-essential wget \
-    libgl1 libglib2.0-0 libsm6 libxext6 libxrender1 libgomp1 \
+    libgl1 libglib2.0-0 libsm6 libxext6 libxrender1 libgomp1 libjpeg-dev \
     ca-certificates curl \
     && rm -rf /var/lib/apt/lists/*
 
@@ -33,6 +33,10 @@ RUN mkdir -p /app/media
 # 6. 拷貝程式碼 (放到越後面越好，因為程式碼最常改動)
 # 注意：因為有 .dockerignore，所以不會拷貝到 venv 那些垃圾檔案了！
 COPY . .
+
+# Optional helper script for background removal
+COPY docker/run_remove_bg.sh /usr/local/bin/run_remove_bg.sh
+RUN chmod +x /usr/local/bin/run_remove_bg.sh
 
 # 7. 智慧預載 rembg 模型 (包含預設與人像優化版)
 # 先檢查模型是否已存在，不存在才透過 curl 下載，大幅加快容器冷啟動速度

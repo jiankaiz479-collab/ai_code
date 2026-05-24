@@ -15,6 +15,24 @@ on_error() {
 }
 trap on_error ERR
 
+# Quick subcommand: run background removal helper
+if [ "${1:-}" = "removebg" ]; then
+  shift
+  # Prefer running the local script if present
+  if [ -f "./scripts/auto_refine_bg.py" ]; then
+    if [ "$#" -eq 0 ]; then
+      exec python ./scripts/auto_refine_bg.py --help
+    else
+      exec python ./scripts/auto_refine_bg.py "$@"
+    fi
+  else
+    # Fallback: run inside Docker image (image includes /usr/local/bin/run_remove_bg.sh)
+    echo "Local remove-bg script not found; running inside Docker image..."
+    docker build -t ai-code-removebg:latest . >/dev/null 2>&1 || true
+    exec docker run --rm -v "$(pwd)/images:/data/images" -v "$(pwd)/outputs:/data/outputs" ai-code-removebg:latest "$@"
+  fi
+fi
+
 echo "======================================================="
 echo "🛡️  正在進行系統全面檢查與初始化..."
 echo "======================================================="

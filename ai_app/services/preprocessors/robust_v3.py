@@ -58,6 +58,25 @@ class HumanParsingRemoveBg(RemoveBgPipeline):
         except Exception as e:
             return self._fail("1500", f"模型載入失敗: {e}")
 
+        # 解析要保留的部位（從環境變數），格式: "upper,lower,dress"
+        keep_env = os.getenv("REMOVE_BG_V3_KEEP_PARTS", "").strip()
+        if keep_env:
+            # 支援同義詞映射
+            synonym_map = {
+                "top": "upper",
+                "tops": "upper",
+                "shirt": "upper",
+                "pants": "lower",
+                "trousers": "lower",
+                "skirt": "lower",
+                "dress": "dress",
+            }
+            keep_parts = set()
+            for token in [p.strip().lower() for p in keep_env.split(",") if p.strip()]:
+                keep_parts.add(synonym_map.get(token, token))
+        else:
+            keep_parts = None
+
         try:
             # Step 2: 準備 ONNX 輸入 Tensor (768x768)
             img_resized = img_rgb.resize((768, 768), Image.BILINEAR)
@@ -101,16 +120,27 @@ class HumanParsingRemoveBg(RemoveBgPipeline):
                 if final_img:
                     extracted_items[label_name] = final_img
 
-            # Step 5: 分別提取上衣、下著、連身裙
-            _extract_part(1, "upper")
-            _extract_part(2, "lower")
-            _extract_part(3, "dress")
+            # Step 5: 分別提取上衣、下著、連身裙（可透過環境變數選擇保留哪些部位）
+            if keep_parts is None or "upper" in keep_parts:
+                _extract_part(1, "upper")
+            if keep_parts is None or "lower" in keep_parts:
+                _extract_part(2, "lower")
+            if keep_parts is None or "dress" in keep_parts:
+                _extract_part(3, "dress")
             
             if not extracted_items:
                 return self._fail("1423", "未偵測到任何明顯的服裝區塊")
                 
-            # 為了向下相容現有的 API，把上衣或洋裝設為主要的 image
-            fallback_img = extracted_items.get("upper") or extracted_items.get("dress") or extracted_items.get("lower")
+            # 為了向下相容現有的 API，把已保留的部位按優先順序選為主要 image
+            priority = ["upper", "dress", "lower"]
+            if keep_parts is not None:
+                # 若使用者指定保留順序，優先依照 priority 中僅保留的項目
+                priority = [p for p in priority if p in keep_parts]
+            fallback_img = None
+            for p in priority:
+                if p in extracted_items:
+                    fallback_img = extracted_items[p]
+                    break
             
             # 將多個物件放進 result 屬性中回傳
             result = RemoveBgResult(image=fallback_img, ok=True, code="1200")
