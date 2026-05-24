@@ -13,6 +13,7 @@ from django.views.decorators.csrf import csrf_exempt
 # Service Layer：view 只負責 HTTP I/O，業務邏輯全在 services/
 from .services.processing import AIProcessor  # ReconstructView 仍直接呼叫 (尚未抽 service)
 from .services.remove_bg_service import RemoveBgService
+from .services.remove_bg_guidance import get_remove_bg_improvement_tips
 from .services.try_on_service import TryOnService
 from .services.reconstruct_3d_service import Reconstruct3DService, Reconstruct3DOptions
 from .services.try_on_3d_service import TryOn3DService
@@ -88,12 +89,19 @@ class RemoveBgView(View):
         http_status, default_detail = self._CODE_MAP.get(code, (500, "未知錯誤"))
         detail = detail or default_detail
         logger.warning(f"❌ [G2] 失敗 message={code} http={http_status} detail={detail}")
-        ui_behavior = (diagnosis or {}).get("ui_behavior") or detail
+        ui_behavior = (
+            (diagnosis or {}).get("ui_behavior")
+            or (diagnosis or {}).get("suggestion")
+            or detail
+        )
         payload = {
             "code": http_status,
             "message": int(code),
             "debug_info": {"ui_behavior": ui_behavior},
         }
+        improvement_tips = get_remove_bg_improvement_tips(str(code), diagnosis)
+        if improvement_tips:
+            payload["debug_info"]["improvement_tips"] = improvement_tips
         return JsonResponse(payload, status=http_status)
 
     def _success_response(self, result, start_time):
