@@ -1,6 +1,6 @@
 """去背失敗時的使用者改善建議。"""
 
-from typing import Mapping
+from typing import Any, Mapping
 
 
 BACKGROUND_REMOVAL_IMPROVEMENT_TIPS = [
@@ -14,7 +14,7 @@ BACKGROUND_REMOVAL_IMPROVEMENT_TIPS = [
 ]
 
 
-def get_remove_bg_improvement_tips(code: str, diagnosis: Mapping | None) -> list[str]:
+def get_remove_bg_improvement_tips(code: str, diagnosis: Mapping[str, Any] | None) -> list[str]:
     """根據去背失敗類型回傳可執行的改善建議。"""
     failure_type = (diagnosis or {}).get("failure_type")
     if str(code) == "1423" or failure_type == "background_not_removed":
