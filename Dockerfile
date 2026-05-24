@@ -46,6 +46,22 @@ RUN mkdir -p ${U2NET_HOME} && \
         curl -L -o ${U2NET_HOME}/u2net.onnx https://github.com/danielgatis/rembg/releases/download/v0.0.0/u2net.onnx; \
     fi
 
+# 8. 預載 MODNet（人像 matting 輕量模型）
+# 把 third_party/MODNet clone 到容器、安裝其 requirements，並下載預訓練權重
+RUN mkdir -p /app/third_party && \
+    if [ ! -d "/app/third_party/MODNet" ]; then \
+        git clone --depth 1 https://github.com/ZHKKKe/MODNet.git /app/third_party/MODNet; \
+    fi && \
+    if [ -f /app/third_party/MODNet/requirements.txt ]; then \
+        pip install --no-cache-dir -r /app/third_party/MODNet/requirements.txt || true; \
+    fi && \
+    mkdir -p /app/third_party/MODNet/checkpoints && \
+    if [ ! -f "/app/third_party/MODNet/checkpoints/modnet_photographic_portrait_matting.pth" ]; then \
+        echo "Downloading MODNet checkpoint..." && \
+        curl -L -o /app/third_party/MODNet/checkpoints/modnet_photographic_portrait_matting.pth \
+            https://github.com/ZHKKKe/MODNet/releases/download/v1.0/modnet_photographic_portrait_matting.pth || true; \
+    fi
+
 EXPOSE ${RUN_PORT:-8002}
 
 CMD ["sh", "-c", "python manage.py migrate && python manage.py runserver 0.0.0.0:${RUN_PORT:-8002}"]
