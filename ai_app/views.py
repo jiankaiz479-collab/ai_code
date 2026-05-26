@@ -19,6 +19,10 @@ from .services.reconstruct_3d_service import Reconstruct3DService, Reconstruct3D
 from .services.try_on_3d_service import TryOn3DService
 from .models import HistoryRecord
 from django.conf import settings
+from .services.preprocessors import get_remove_bg_pipeline
+from .services.storage_service import StorageService
+import io
+import base64
 
 # ==========================================
 # 1. 去背功能 (Remove Background)
@@ -83,6 +87,225 @@ class RemoveBgView(View):
             return self._fail_response(result.code, result.error_detail, result.diagnosis)
 
         return self._success_response(result, start_time)
+
+    # ---- helpers for RemoveBgView ----
+    def _fail_response(self, code, detail, diagnosis=None):
+        http_status, default_detail = self._CODE_MAP.get(code, (500, "未知錯誤"))
+        detail = detail or default_detail
+        logger.warning(f"❌ [G2] 失敗 message={code} http={http_status} detail={detail}")
+        ui_behavior = (diagnosis or {}).get("ui_behavior") if isinstance(diagnosis, dict) else (diagnosis or detail)
+        payload = {
+            "code": http_status,
+            "message": int(code) if isinstance(code, (str, int)) and str(code).isdigit() else code,
+            "debug_info": {"ui_behavior": ui_behavior},
+        }
+        return JsonResponse(payload, status=http_status)
+
+    def _success_response(self, result, start_time):
+        analysis_data = {
+            "code": 200,
+            "message": "1200",
+            "data": {
+                "file_name": result.file_name,
+                "style_analysis": result.style_analysis,
+            }
+        }
+
+        # 如果有多部位拆解，將檔名加入 JSON 讓前端知道
+        if getattr(result, 'extracted_items_data', None):
+            analysis_data["data"]["extracted_items"] = {k: v["file_name"] for k, v in result.extracted_items_data.items()}
+
+        json_pretty = json.dumps(analysis_data, indent=4, ensure_ascii=False)
+        boundary = 'bg_removal_boundary'
+        body = [
+            f'--{boundary}\r\nContent-Disposition: form-data; name="analysis"\r\nContent-Type: application/json\r\n\r\n{json_pretty}\r\n'.encode('utf-8'),
+            f'--{boundary}\r\nContent-Disposition: form-data; name="processed_image"; filename="{result.file_name}"\r\nContent-Type: image/png\r\n\r\n'.encode('utf-8'),
+        ]
+        try:
+            with open(result.file_path, 'rb') as f:
+                body.append(f.read())
+            body.append(b'\r\n')
+        except Exception:
+            logger.warning(f"[G2] 無法讀取處理後檔案: {getattr(result, 'file_path', None)}")
+
+        # 附加多部位的實體圖片檔案 (例如 name="upper" / name="lower")
+        if getattr(result, 'extracted_items_data', None):
+            for part_name, part_data in result.extracted_items_data.items():
+                body.append(f'--{boundary}\r\nContent-Disposition: form-data; name="{part_name}"; filename="{part_data["file_name"]}"\r\nContent-Type: image/png\r\n\r\n'.encode('utf-8'))
+                try:
+                    with open(part_data["file_path"], 'rb') as f:
+                        body.append(f.read())
+                except Exception:
+                    logger.warning(f"[G2] 無法讀取部位檔案: {part_data.get('file_path')}")
+                body.append(b'\r\n')
+
+        body.append(f'--{boundary}--\r\n'.encode('utf-8'))
+
+        logger.info(f"🎉 [G2] 去背完成！總耗時: {time.time()-start_time:.2f}s")
+        return HttpResponse(b''.join(body), content_type=f'multipart/form-data; boundary={boundary}')
+
+
+@method_decorator(csrf_exempt, name='dispatch')
+class ClothesExtractView(View):
+    """衣物擷取：輸入為穿著中的 model 圖片，回傳上半身與下半身兩張 PNG。
+
+    接收欄位：`person_image`（multipart/form-data），若沒有則嘗試 `image`。
+    回傳：multipart/form-data，包含 JSON analysis 與 name="upper" / name="lower" 的 image/png 檔案（若缺某部位則不包含該欄位）。
+    """
+    def post(self, request, *args, **kwargs):
+        start_time = time.time()
+        start_dt = timezone.localtime(timezone.now())
+        logger.info("--- [G-extract] 接收到衣物擷取請求 ---")
+
+        img_file = request.FILES.get('person_image') or request.FILES.get('image')
+        if not img_file:
+            return JsonResponse({"code": 400, "message": "missing person_image"}, status=400)
+        if not img_file.content_type.startswith('image/'):
+            return JsonResponse({"code": 415, "message": "invalid image type"}, status=415)
+
+        try:
+            pil = Image.open(img_file).convert('RGBA')
+        except Exception as e:
+            logger.exception(f"[G-extract] open image failed: {e}")
+            return JsonResponse({"code": 500, "message": "cannot open image", "detail": str(e)}, status=500)
+
+        # 使用 pipeline 直接提取部位（robust_v3 的 HumanParsingRemoveBg 會回傳 extracted_items）
+        pipeline = get_remove_bg_pipeline(AIProcessor())
+        try:
+            res = pipeline.process(pil.convert('RGB'))
+        except Exception as e:
+            logger.exception(f"[G-extract] pipeline process failed: {e}")
+            return JsonResponse({"code": 500, "message": "pipeline failed", "detail": str(e)}, status=500)
+
+        if not res.ok:
+            return JsonResponse({"code": 422, "message": "extraction failed", "detail": res.error_detail}, status=422)
+
+        extracted = getattr(res, 'extracted_items', {}) or {}
+
+        # Initialize services
+        processor = AIProcessor()
+        storage = StorageService()
+
+        # 1) For each extracted part (upper/lower), perform background removal + style analysis + upload
+        extracted_items_meta = {}
+        any_part_uploaded = False
+        style_analysis = {}
+        for part_name in ('upper', 'lower'):
+            part_img = extracted.get(part_name)
+            if not part_img:
+                continue
+
+            try:
+                # run background removal on the clothing part
+                proc_part_img, p_ok, p_code, p_err = processor.remove_background(part_img)
+            except Exception as e:
+                logger.exception(f"[G-extract] remove_background on part {part_name} failed: {e}")
+                proc_part_img, p_ok, p_code, p_err = None, False, '1500', str(e)
+
+            # analyze style on the processed part if available
+            part_style = None
+            if proc_part_img and p_ok:
+                try:
+                    part_style, s_ok, s_code, s_err = processor.analyze_clothing_style(proc_part_img, mode='garment')
+                    if not s_ok:
+                        logger.warning(f"[G-extract] style analysis failed for {part_name}: {s_err}")
+                except Exception as e:
+                    logger.warning(f"[G-extract] analyze_clothing_style failed for {part_name}: {e}")
+
+            # prepare upload image (processed if available, otherwise original)
+            upload_img = proc_part_img if (proc_part_img and p_ok) else part_img
+            # serialize bytes for response
+            try:
+                bio_part = io.BytesIO()
+                upload_img.save(bio_part, format='PNG')
+                bio_part.seek(0)
+                img_bytes = bio_part.read()
+            except Exception as e:
+                logger.warning(f"[G-extract] failed to serialize upload_img for {part_name}: {e}")
+                img_bytes = b''
+
+            try:
+                object_key, thumb_key = storage.upload_image(upload_img, prefix=part_name)
+                any_part_uploaded = True
+            except Exception as e:
+                logger.warning(f"[G-extract] upload for part {part_name} failed: {e}")
+                object_key, thumb_key = None, None
+
+            file_name = object_key or f"{part_name}.png"
+            extracted_items_meta[part_name] = {
+                'file_name': file_name,
+                'object_key': object_key,
+                'thumb_key': thumb_key,
+                'style_analysis': part_style,
+                'bytes': img_bytes,
+            }
+            # collect per-part style into top-level style_analysis dict
+            style_analysis[part_name] = part_style
+
+        # 4) Build analysis JSON (include per-part metadata + style analysis)
+        analysis_data = {
+            'code': 200,
+            'message': '1200',
+            'data': {
+                'file_name': None,
+                'style_analysis': style_analysis,
+            }
+        }
+        if extracted_items_meta:
+            # sanitize metadata for JSON responses / DB (exclude raw bytes)
+            sanitized_meta = {}
+            for k, v in extracted_items_meta.items():
+                sanitized_meta[k] = {kk: vv for kk, vv in v.items() if kk != 'bytes'}
+            analysis_data['data']['extracted_items'] = sanitized_meta
+
+        # 5) Build multipart response (analysis JSON + processed part images)
+        json_pretty = json.dumps(analysis_data, indent=4, ensure_ascii=False)
+        boundary = 'bg_removal_boundary'
+        body = [
+            f'--{boundary}\r\nContent-Disposition: form-data; name="analysis"\r\nContent-Type: application/json\r\n\r\n{json_pretty}\r\n'.encode('utf-8')
+        ]
+
+        # Attach processed images for each extracted part (use uploaded processed image if available)
+        for part_name in ('upper', 'lower'):
+            meta = extracted_items_meta.get(part_name)
+            if not meta:
+                continue
+            img_bytes = meta.get('bytes') or b''
+            file_name = meta.get('file_name') or f"{part_name}.png"
+            body.append(f'--{boundary}\r\nContent-Disposition: form-data; name="{part_name}"; filename="{file_name}"\r\nContent-Type: image/png\r\n\r\n'.encode('utf-8'))
+            body.append(img_bytes)
+            body.append(b'\r\n')
+
+        body.append(f'--{boundary}--\r\n'.encode('utf-8'))
+
+        # 7) Write HistoryRecord
+        try:
+            end_dt = timezone.localtime(timezone.now())
+            # choose the first uploaded part as representative object for history
+            rep_object_key = None
+            rep_thumb_key = None
+            if extracted_items_meta:
+                first_meta = next(iter(extracted_items_meta.values()))
+                rep_object_key = first_meta.get('object_key')
+                rep_thumb_key = first_meta.get('thumb_key')
+
+            record = HistoryRecord(
+                operation='clothes_extract',
+                status='success',
+                bucket=getattr(storage, 'bucket', 'history-images'),
+                object_key=rep_object_key,
+                thumb_key=rep_thumb_key,
+                response_json=analysis_data,
+                start_ts=start_dt,
+                end_ts=end_dt,
+                exec_time_ms=int((time.time() - start_time) * 1000),
+            )
+            record.save()
+        except Exception as e:
+            logger.warning(f"[G-extract] Failed to write HistoryRecord: {e}")
+
+        logger.info(f"🎉 [G-extract] 衣物擷取完成, parts={list(extracted.keys())} time={time.time()-start_time:.2f}s")
+        return HttpResponse(b''.join(body), content_type=f'multipart/form-data; boundary={boundary}')
 
     # ---- helpers ----
     def _fail_response(self, code, detail, diagnosis):

@@ -8,6 +8,7 @@ from .views import (
     HistoryPageView,
     HistoryApiView,
     HistoryMediaProxyView,
+    ClothesExtractView,
 )
 
 urlpatterns = [
@@ -23,4 +24,5 @@ urlpatterns = [
     path('history/', HistoryPageView.as_view(), name='history_page'),
     path('api/history/', HistoryApiView.as_view(), name='api_history'),
     path('api/history/media/<str:bucket>/<path:key>/', HistoryMediaProxyView.as_view(), name='history_media_proxy'),
+    path('virtual_try_on/clothes/extract', ClothesExtractView.as_view(), name='clothes_extract'),
 ]
